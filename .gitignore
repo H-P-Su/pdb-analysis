@@ -1,0 +1,14 @@
+# Virtual environment
+venv/
+
+# Downloaded structure/sequence files
+Files/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.Python
+
+# macOS
+.DS_Store
