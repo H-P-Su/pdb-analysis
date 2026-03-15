@@ -334,7 +334,62 @@ python3 analyze_rmsd.py Files/6D1Z.pdb Files/6D20.pdb --align resnum
 
 ---
 
-## 6. Running All Examples at Once
+## 6. Sequence Conservation — `conservation.py`
+
+Maps per-residue conservation scores onto a PDB structure using a multi-FASTA file of homologous sequences. Uses BLOSUM62 pairwise alignment — no BLAST or network access required.
+
+### Basic usage
+
+```bash
+python3 conservation.py Files/6D1Y.pdb homologs.fasta
+```
+
+Extracts the reference sequence from chain A ATOM records, aligns every sequence in `homologs.fasta`, and writes three output files to the same directory as the PDB:
+
+```
+6D1Y_conservation.png   # bar chart: red (variable) → blue (conserved)
+6D1Y_conservation.pdb   # B-factor column = conservation score × 100
+6D1Y_conservation.csv   # resnum, aa, score, entropy, gap_fraction, n_sequences
+```
+
+### Specify chain and output directory
+
+```bash
+python3 conservation.py Files/4HHB.pdb homologs.fasta --chain A --out results/
+```
+
+Uses only chain A as the reference sequence and writes outputs to `results/`.
+
+### Skip the PDB or plot output
+
+```bash
+python3 conservation.py Files/6D1Y.pdb homologs.fasta --no-pdb     # CSV + plot only
+python3 conservation.py Files/6D1Y.pdb homologs.fasta --no-plot    # CSV + PDB only
+```
+
+### Colour by conservation in PyMOL
+
+```bash
+# The script prints this command after each run:
+load 6D1Y_conservation.pdb;  spectrum b, red_white_blue, minimum=0, maximum=100
+```
+
+Residues coloured white are fully variable; blue = fully conserved.
+
+### FASTA file format
+
+Standard multi-FASTA — one or more sequences, any number of sequences:
+
+```
+>UniProt_P12345 Human kinase
+MKTAYIAKQRQISFVKSHFSRQLEERLGLIEVQAPILSRVGDGTQDNLSGAEKAVQVKVKALPDAQNTAH...
+>UniProt_Q98765 Mouse kinase
+MKTAYIAKQRQISFVKSHFSRQLEERLGLIEVQAPILSRVGDGTQDNLSGAEKAVQVKVKALPDAQNTSH...
+```
+
+---
+
+## 7. Running All Examples at Once
 
 The `examples.py` script downloads six demo structures and exercises every feature above, saving all outputs to `demo_output/`:
 
@@ -378,7 +433,7 @@ python3 examples.py
 
 ---
 
-## 7. Ligand RMSD — `ligand_rmsd.py`
+## 8. Ligand RMSD — `ligand_rmsd.py`
 
 Computes heavy-atom RMSD for a named ligand across multiple PDB structures, after aligning each structure to a reference by backbone Cα superposition.
 
@@ -452,7 +507,7 @@ Computes and prints z-scores but includes every structure in the average regardl
 
 ---
 
-## 8. Molecular Dynamics Pipeline — `run_md.py`
+## 9. Molecular Dynamics Pipeline — `run_md.py`
 
 > **Requires GROMACS** in PATH. Install first:
 > ```bash

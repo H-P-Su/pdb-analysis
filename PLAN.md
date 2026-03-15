@@ -1,171 +1,75 @@
-# PDB Downloader — Project Plan
+# PDB Toolkit — Project Plan
 
 ## Goal
-A standalone Python CLI script to download structure and sequence files from RCSB (rcsb.org) given one or more PDB IDs.
+A suite of standalone Python CLI scripts for downloading, analysing, visualising, and running molecular dynamics on protein structures from RCSB.
 
 ## Project Structure
 ```
 PDBs/
-├── PLAN.md             # This file
-├── download_pdb.py     # Main CLI script
-├── venv/               # Python virtual environment
-└── Files/              # Default download output directory
+├── PLAN.md                    # This file
+├── MD_TUTORIAL.md             # Science behind the MD pipeline
+├── examples.md                # Runnable CLI examples for every script
+├── future_features.md         # Feature backlog
+├── requirements.txt           # Python dependencies
+├── download_pdb.py            # Download PDB/CIF/FASTA from RCSB
+├── summarize_structures.py    # Metadata, B-factor, Ramachandran, FASTA, Rg, batch CSV
+├── analyze_ligands.py         # Ligand contacts, H-bonds, pi, salt bridges
+├── visualize_interactions.py  # 3D HTML viewer + 2D fingerprint PNG
+├── analyze_rmsd.py            # Cα RMSD, superposition, pairwise matrix, NMR ensemble
+├── ligand_rmsd.py             # Ligand heavy-atom RMSD across multiple structures
+├── conservation.py            # Per-residue sequence conservation from FASTA
+├── run_md.py                  # Full GROMACS MD pipeline
+├── examples.py                # Runnable demo of all scripts
+├── venv/                      # Python virtual environment (not in git)
+└── Files/                     # Downloaded structures and outputs (not in git)
 ```
 
 ## Setup
 ```bash
 python3 -m venv venv
 source venv/bin/activate
+pip install -r requirements.txt
 ```
-No third-party dependencies — stdlib only (`argparse`, `urllib`, `pathlib`).
+
+---
 
 ## Script: download_pdb.py
 
 ### Requirements
-- Download files from RCSB using public URLs (no API key needed)
-- Supported formats:
-  - `--pdb` → `https://files.rcsb.org/download/{ID}.pdb`
-  - `--cif` → `https://files.rcsb.org/download/{ID}.cif`
-  - `--seq` → `https://www.rcsb.org/fasta/entry/{ID}` (saves as `.fasta`)
-- Default format is `--pdb` if no format flag is specified
-- Accept multiple PDB IDs as positional arguments
-- Accept a file of IDs via `--from-file` (one per line, `#` comments, comma-separated ok)
-- Default output directory: `Files/` (created automatically if missing)
-- Skip existing files unless `--overwrite` is passed
-- Print per-file status and a summary line at the end
-- Exit with code 1 if any entry fails
-
-### ID Handling
-- Uppercase all IDs
-- Strip trailing `_#` suffixes before processing (e.g. `1ABC_2` → `1ABC`)
-- Validate that the result is exactly 4 alphanumeric characters; warn and skip otherwise
-
-### CLI Interface
-```
-usage: download_pdb.py [--pdb] [--cif] [--seq]
-                       [--from-file FILE]
-                       [--outdir DIR] [--overwrite]
-                       PDB_ID [PDB_ID ...]
-```
-
-### Key Functions
-| Function | Purpose |
-|---|---|
-| `download_file(url, dest, overwrite)` | Fetch a single URL to disk; handles 404 and network errors |
-| `download_entry(pdb_id, outdir, fmt_pdb, fmt_cif, fmt_seq, overwrite)` | Download all requested formats for one PDB ID |
-| `parse_ids_from_file(path)` | Read IDs from a flat text file |
-| `main()` | Argument parsing, ID normalization, orchestration |
-
-## Dependencies
-
-Install into the venv:
-```bash
-python3 -m venv venv && source venv/bin/activate
-pip install biopython numpy
-```
-
----
-
-## Script: analyze_ligands.py
-
-### Requirements
-- Depends on **BioPython** and **NumPy** (install into venv)
-- All public functions importable for use in other projects
-- PyMOL-compatible selection syntax (subset) for specifying atom groups
-- Interaction types: contacts, H-bonds, pi interactions, salt bridges
-- Ligand aromatic ring detection from CONECT records (PDB only)
-
-### Importable API
-| Function | Returns | Description |
-|---|---|---|
-| `load_structure(path)` | `Structure` | Load PDB or mmCIF |
-| `get_ligands(structure)` | `list[Residue]` | All non-water HETATM residues |
-| `find_contacts(structure, sel1, sel2, cutoff)` | `list[Contact]` | Heavy-atom contacts |
-| `find_hydrogen_bonds(structure, sel1, sel2, ...)` | `list[HBond]` | H-bonds via heavy-atom geometry |
-| `find_pi_interactions(structure, sel1, sel2, ...)` | `list[PiInteraction]` | Pi-stacking + cation-pi |
-| `find_salt_bridges(structure, sel1, sel2, ...)` | `list[SaltBridge]` | Charged group pairs |
-| `analyze_ligand(structure, lig_sel, ...)` | `list[LigandReport]` | All interactions per ligand |
-| `to_csv(interactions, path)` | — | Write results to CSV |
-| `print_table(interactions)` | — | Pretty-print to terminal |
-
-### Selection syntax (PyMOL-compatible)
-- `all`, `none`, `polymer`, `hetatm`, `organic`, `solvent`
-- `chain A+B`, `resn LIG+ATP`, `resi 100`, `resi 100-200`, `name CA`
-- `elem N+O`, `b > 50`
-- `not`, `and`, `or`, `( )`
-- `within N of SELECTION`
+- stdlib only (`argparse`, `urllib`, `pathlib`) — no third-party dependencies
+- Supported formats: `--pdb`, `--cif`, `--seq` (FASTA)
+- Accept multiple IDs as positional args or `--from-file`
+- Default output directory: `Files/`; skip existing unless `--overwrite`
+- Strip `_#` suffixes; validate 4-character alphanumeric IDs
 
 ### CLI
 ```bash
-python3 analyze_ligands.py structure.pdb --ligands
-python3 analyze_ligands.py structure.pdb --contacts "resn ATP" "polymer" --cutoff 4.5
-python3 analyze_ligands.py structure.pdb --hbonds "polymer" "resn ATP"
-python3 analyze_ligands.py structure.pdb --pi "polymer" "resn ATP"
-python3 analyze_ligands.py structure.pdb --salt-bridges "polymer" "polymer"
-python3 analyze_ligands.py structure.pdb --analyze "resn ATP" --out report.csv
-```
-
----
-
----
-
-## Script: visualize_interactions.py
-
-### Requirements
-- Depends on `analyze_ligands.py`, **py3Dmol**, **matplotlib**, **numpy**
-- Generates two outputs per ligand: interactive HTML + 2D fingerprint PNG
-- All functions importable
-
-### Outputs
-| File | Description |
-|---|---|
-| `{LIG}_{chain}{resi}.html` | Interactive 3D viewer (py3Dmol, opens in any browser) |
-| `{LIG}_{chain}{resi}_fingerprint.png` | 2D dot-plot: residues × interaction types |
-
-### Color scheme
-| Type | Color |
-|---|---|
-| Ligand | Yellow |
-| Contacts | Cyan sticks |
-| H-bonds | Orange sticks + yellow dashed lines |
-| Pi interactions | Magenta sticks + magenta dashed lines |
-| Salt bridges (+/−) | Blue/red sticks + orange dashed lines |
-
-### Importable API
-| Function | Description |
-|---|---|
-| `build_view(path, report, structure, w, h)` | Build py3Dmol view (for notebooks) |
-| `save_html(path, report, output, ...)` | Write interactive HTML file |
-| `plot_interaction_summary(report, output)` | Write 2D fingerprint PNG |
-| `visualize(path, lig_sel, ...)` | Run full pipeline, return list of outputs |
-
-### CLI
-```bash
-python3 visualize_interactions.py structure.pdb --analyze "organic"
-python3 visualize_interactions.py structure.pdb --analyze "resn ATP" --outdir ./images --width 1200
+python3 download_pdb.py 4HHB
+python3 download_pdb.py --pdb --cif --seq 4HHB 2HHB
+python3 download_pdb.py --from-file ids.txt --outdir ./my_structs
+python3 download_pdb.py --overwrite 4HHB
 ```
 
 ---
 
 ## Script: summarize_structures.py
 
-### Requirements
-- Depends on **BioPython**, **NumPy**, **Matplotlib**
-- All functions importable
+### Dependencies
+BioPython, NumPy, Matplotlib
 
-### Functions
+### Key Functions
 | Function | Description |
 |---|---|
-| `parse_header(path)` | Resolution, R-work/free, method, organism, date from REMARK records |
-| `summarize_structure(path)` | Full summary dict (chains, residues, atoms, ligands, missing) |
+| `parse_header(path)` | Resolution, R-work/free, method, organism, date |
+| `summarize_structure(path)` | Full summary dict |
 | `batch_summary(paths, out_csv)` | Summarize N structures → CSV |
 | `find_missing_residues(path)` | SEQRES vs ATOM comparison per chain |
 | `extract_fasta(path, chain)` | FASTA from ATOM coordinates |
 | `bfactor_stats(structure, chain)` | Per-residue Cα B-factor with ±2σ flags |
 | `radius_of_gyration(structure, chain)` | Cα Rg in Å |
 | `ramachandran_data(structure, chain)` | phi/psi angles + region classification |
-| `plot_bfactor(data, output)` | B-factor profile bar plot PNG |
-| `plot_ramachandran(data, output)` | Ramachandran scatter plot PNG |
+| `plot_bfactor(data, output)` | B-factor profile PNG |
+| `plot_ramachandran(data, output)` | Ramachandran scatter PNG |
 
 ### CLI
 ```bash
@@ -180,34 +84,85 @@ python3 summarize_structures.py 1abc.pdb --rg
 
 ---
 
+## Script: analyze_ligands.py
+
+### Dependencies
+BioPython, NumPy
+
+### Key Functions
+| Function | Returns | Description |
+|---|---|---|
+| `load_structure(path)` | `Structure` | Load PDB or mmCIF |
+| `find_contacts(structure, sel1, sel2, cutoff)` | `list[Contact]` | Heavy-atom contacts |
+| `find_hydrogen_bonds(...)` | `list[HBond]` | H-bonds via heavy-atom geometry |
+| `find_pi_interactions(...)` | `list[PiInteraction]` | Pi-stacking + cation-pi |
+| `find_salt_bridges(...)` | `list[SaltBridge]` | Charged group pairs |
+| `analyze_ligand(structure, lig_sel, ...)` | `list[LigandReport]` | All interactions per ligand |
+
+### CLI
+```bash
+python3 analyze_ligands.py structure.pdb --ligands
+python3 analyze_ligands.py structure.pdb --contacts "resn ATP" "polymer" --cutoff 4.5
+python3 analyze_ligands.py structure.pdb --hbonds "polymer" "resn ATP"
+python3 analyze_ligands.py structure.pdb --pi "polymer" "resn ATP"
+python3 analyze_ligands.py structure.pdb --salt-bridges "polymer" "polymer"
+python3 analyze_ligands.py structure.pdb --analyze "resn ATP" --out report.csv
+```
+
+---
+
+## Script: visualize_interactions.py
+
+### Dependencies
+BioPython, NumPy, Matplotlib; py3Dmol only needed for `build_view()` (notebook use)
+HTML output loads **3Dmol.js via CDN** — no py3Dmol required for CLI use.
+
+### Outputs
+| File | Description |
+|---|---|
+| `{LIG}_{chain}{resi}.html` | Self-contained 3D viewer with per-type toggles and residue panel |
+| `{LIG}_{chain}{resi}_fingerprint.png` | 2D dot-plot: residues × interaction types |
+
+### HTML viewer features
+- Toggle show/hide per interaction type (contacts, H-bonds, pi, salt bridges) — updates both 3D scene and residue panel simultaneously
+- **Show all / Hide all** buttons
+- Side panel lists every partner residue with atom names, distances, and roles
+- Loads 3Dmol.js from CDN; fully self-contained single HTML file
+
+### Color scheme
+| Type | Color |
+|---|---|
+| Ligand | Yellow |
+| Contacts | Cyan sticks |
+| H-bonds | Orange sticks + yellow dashed lines |
+| Pi interactions | Magenta sticks + magenta dashed lines |
+| Salt bridges (+/−) | Blue/red sticks + orange dashed lines |
+
+### CLI
+```bash
+python3 visualize_interactions.py structure.pdb --analyze "organic"
+python3 visualize_interactions.py structure.pdb --analyze "resn ATP" --outdir ./images --width 1200
+```
+
+---
+
 ## Script: analyze_rmsd.py
 
-### Requirements
-- Depends on **BioPython** (`Superimposer`, `PairwiseAligner`), **NumPy**, **Matplotlib**
-- All functions importable
+### Dependencies
+BioPython, NumPy, Matplotlib
 
-### Functions
+### Key Functions
 | Function | Description |
 |---|---|
-| `load_ca_atoms(path, chain, model)` | Cα atoms + one-letter sequence |
-| `align_sequences(seq1, seq2)` | Global alignment → matched index pairs |
 | `calculate_rmsd(path1, path2, ...)` | Cα RMSD after optimal superposition |
 | `superpose(path1, path2, ..., output)` | Superpose mobile onto reference, save PDB |
 | `per_residue_rmsd(path1, path2, ...)` | Per-residue Cα distance after superposition |
 | `pairwise_rmsd_matrix(paths, ...)` | All-vs-all RMSD matrix |
 | `nmr_ensemble_rmsd(path, ...)` | Per-model RMSD vs reference for NMR ensembles |
-| `plot_rmsd_matrix(matrix, labels, out)` | Heatmap PNG |
-| `plot_per_residue_rmsd(data, out)` | Bar plot PNG |
-| `plot_ensemble_rmsd(data, out)` | Ensemble bar plot PNG |
-
-### Alignment modes
-- `align_by="sequence"` — global pairwise alignment (handles insertions/deletions)
-- `align_by="resnum"` — match by residue number (fast; requires same numbering scheme)
 
 ### CLI
 ```bash
-python3 analyze_rmsd.py struct1.pdb struct2.pdb
-python3 analyze_rmsd.py struct1.pdb struct2.pdb --chain A --per-residue --plot
+python3 analyze_rmsd.py struct1.pdb struct2.pdb [--chain A] [--per-residue] [--plot]
 python3 analyze_rmsd.py struct1.pdb struct2.pdb --superpose --out superposed.pdb
 python3 analyze_rmsd.py Files/*.pdb --matrix --out rmsd.csv --plot
 python3 analyze_rmsd.py nmr.pdb --ensemble --plot
@@ -215,46 +170,123 @@ python3 analyze_rmsd.py nmr.pdb --ensemble --plot
 
 ---
 
+## Script: ligand_rmsd.py
+
+### Dependencies
+BioPython, NumPy, tabulate
+
+### Description
+Computes heavy-atom RMSD for a named ligand across multiple PDB structures.
+Aligns each structure to a reference by backbone Cα superposition (Kabsch).
+Flags outliers by z-score and excludes them from the final average.
+
+### Key Functions
+| Function | Description |
+|---|---|
+| `get_backbone_atoms(structure, chain)` | Cα atoms for superposition |
+| `get_ligand_heavy_atoms(structure, resn, chain)` | Non-hydrogen ligand atoms |
+| `align_to_reference(mobile, ref, chain)` | In-place backbone superposition |
+| `compute_centroid_coords(atom_dicts)` | Mean coords across all structures |
+| `compute_rmsd(coords1, coords2)` | RMSD + atom count |
+
+### CLI
+```bash
+python3 ligand_rmsd.py --ligand HEM Files/2HHB.pdb Files/4HHB.pdb
+python3 ligand_rmsd.py --ligand HEM --reference ref.pdb "structures/*.pdb"
+python3 ligand_rmsd.py --ligand HEM --chain A --zscore 1.5 "structures/*.pdb"
+python3 ligand_rmsd.py --ligand HEM --no-exclude "structures/*.pdb"
+```
+
+### Test result (2HHB vs 4HHB, HEM)
+- Centroid mode: both structures 0.126 Å from centroid (43 atoms matched)
+- Explicit ref (4HHB): 2HHB deviates 0.251 Å — oxy vs deoxy heme rearrangement
+
+---
+
+## Script: conservation.py
+
+### Dependencies
+BioPython, NumPy, Matplotlib
+
+### Description
+Maps sequence conservation onto a PDB structure from a user-supplied multi-FASTA file.
+No BLAST or network access required.
+
+### Algorithm
+1. Extract reference sequence from ATOM records
+2. Pairwise-align each FASTA sequence to reference with BLOSUM62 global alignment
+3. Compute per-column Shannon entropy → conservation score (1 = fully conserved, 0 = fully variable)
+4. Write B-factor PDB, bar chart PNG, and CSV
+
+### Outputs
+| File | Description |
+|---|---|
+| `<stem>_conservation.png` | Bar chart, red→blue by conservation score |
+| `<stem>_conservation.pdb` | PDB with conservation (0–100) in B-factor column |
+| `<stem>_conservation.csv` | resnum, aa, score, entropy, gap_fraction, n_sequences |
+
+### CLI
+```bash
+python3 conservation.py 1abc.pdb homologs.fasta
+python3 conservation.py 1abc.pdb homologs.fasta --chain A --out results/
+python3 conservation.py 1abc.pdb homologs.fasta --no-pdb
+```
+
+### PyMOL colouring
+```
+load 6D1Y_conservation.pdb;  spectrum b, red_white_blue, minimum=0, maximum=100
+```
+
+---
+
 ## Script: run_md.py
 
 ### Requirements
-- Requires **GROMACS ≥ 2019** (external executable, LGPL v2.1) — `brew install gromacs` / `sudo apt install gromacs`
-- **numpy**, **matplotlib** (BSD) — `pip install numpy matplotlib`
-- **pdbfixer + openmm** (MIT) — `pip install pdbfixer openmm` — **strongly recommended**; fills missing side-chain atoms that would otherwise cause `pdb2gmx` to fail (e.g. disordered residues in crystal structures)
-- **MDAnalysis** (GPL v2) — `pip install MDAnalysis` — recommended; enables DSSP secondary structure analysis
+- **GROMACS ≥ 2019** (external, LGPL) — `brew install gromacs` / `sudo apt install gromacs`
+- **numpy**, **matplotlib** — `pip install numpy matplotlib`
+- **pdbfixer + openmm** (MIT) — strongly recommended; fills missing side-chain atoms
+- **MDAnalysis** (GPL v2) — `pip install MDAnalysis` — enables DSSP and PCA
 
 ### Pipeline stages
 | Stage | What it does |
 |---|---|
-| `prepare` | Strip HETATM/ANISOU; fix missing atoms via PDBFixer if available |
-| `setup` | `pdb2gmx` (force field + H atoms) → `editconf` (dodecahedral box) → `solvate` (TIP3P water) → `genion` (Na⁺/Cl⁻ neutralisation) |
-| `minimize` | Steepest-descent energy minimisation (≤50,000 steps, F_max < 1000 kJ/mol/nm) |
-| `equil` | NVT 100 ps (V-rescale thermostat, position restraints) → NPT 100 ps (+ Berendsen barostat) |
-| `run` | Production MD with Parrinello-Rahman barostat; XTC saved every 10 ps |
-| `analyze` | Backbone RMSD, per-residue Cα RMSF, radius of gyration, potential energy + temperature, H-bond count, DSSP secondary structure timeline |
-| `visualize` | matplotlib multi-panel summary PNG + individual plots; PyMOL `.pml` session script with trajectory loaded as states, RMSF B-factor colouring, and `mset 1 -N` movie setup |
+| `prepare` | Strip HETATM/ANISOU; fix missing atoms via PDBFixer |
+| `setup` | `pdb2gmx` → `editconf` (dodecahedral box) → `solvate` → `genion` |
+| `minimize` | Steepest-descent EM (≤50,000 steps) |
+| `equil` | NVT 100 ps (V-rescale thermostat) → NPT 100 ps (+ Berendsen barostat) |
+| `run` | Production MD (Parrinello-Rahman barostat); XTC saved every 10 ps |
+| `analyze` | RMSD, RMSF, Rg, energy, H-bonds, DSSP, PCA |
+| `visualize` | matplotlib plots; PyMOL `.pml`; self-contained HTML report |
 
-### Output files (in `<stem>_md/`)
+### Analysis outputs (in `<stem>_md/`)
 | File | Description |
 |---|---|
-| `topol.top` | GROMACS topology (force-field parameters) |
-| `em.gro` | Energy-minimised coordinates |
-| `md.tpr` | Production run binary (topology + coordinates) |
-| `md.xtc` | Raw trajectory (all atoms) |
-| `md_fit.xtc` | Trajectory centred and fitted to backbone |
 | `rmsd.xvg` | Backbone RMSD vs time |
 | `rmsf.xvg` | Per-residue Cα RMSF |
 | `gyrate.xvg` | Radius of gyration vs time |
-| `energy.xvg` | Potential energy + temperature vs time |
-| `hbond.xvg` | Intra-protein H-bond count vs time |
+| `energy.xvg` | Potential energy + temperature |
+| `hbond.xvg` | Intra-protein H-bond count |
 | `dssp.npz` | DSSP secondary structure array (frames × residues) |
+| `pca.npz` | PCA results: variance, projected coordinates, PC1 eigenvector |
 | `rmsf_bfactor.pdb` | Reference PDB with RMSF in B-factor column |
+| `pc1_bfactor.pdb` | Reference PDB with PC1 eigenvector magnitude in B-factor column |
+| `md_fit.xtc` | Trajectory centred and fitted to backbone |
 | `plots/<stem>_summary.png` | All analysis panels in one figure |
-| `<stem>_session.pml` | PyMOL session script |
-| `<stem>.pse` | PyMOL binary session (saved by the .pml) |
+| `plots/<stem>_rmsd.png` | Backbone RMSD time series |
+| `plots/<stem>_rmsf.png` | Per-residue flexibility bar chart |
+| `plots/<stem>_rg.png` | Radius of gyration time series |
+| `plots/<stem>_energy.png` | Energy + temperature time series |
+| `plots/<stem>_hbonds.png` | H-bond count time series |
+| `plots/<stem>_dssp.png` | Secondary structure content stacked area |
+| `plots/<stem>_pca.png` | PCA scree plot (variance per PC + cumulative) |
+| `plots/<stem>_pca_scatter.png` | PC1 vs PC2 scatter coloured by time + time series |
+| `plots/<stem>_pca_residues.png` | Per-residue PC1 eigenvector contribution |
+| `<stem>_session.pml` | PyMOL session script (loads structure + trajectory) |
+| `<stem>.pse` | PyMOL binary session |
+| `<stem>_report.html` | Self-contained HTML report with embedded plots and statistics |
 
 ### Default simulation parameters
-| Parameter | Value | Flag to change |
+| Parameter | Value | Flag |
 |---|---|---|
 | Force field | AMBER99SB-ILDN | `--ff` |
 | Water model | TIP3P | `--water` |
@@ -265,8 +297,10 @@ python3 analyze_rmsd.py nmr.pdb --ensemble --plot
 | Save interval | 10 ps | `--save-ps` |
 
 ### Known issues / fixes
-- Crystal structures with disordered side chains (common) will cause `pdb2gmx` to fail with "atom CG not found". Fix: install pdbfixer — it reconstructs missing atoms before `pdb2gmx` runs.
-- PyMOL trajectory playback: `mset 1 xN` repeats state 1 N times (no movement). The correct syntax is `mset 1 -N` which plays states 1 through N sequentially. The script uses the correct form.
+- **Missing side chains**: Crystal structures with disordered residues cause `pdb2gmx` to fail ("atom CG not found"). Fix: install pdbfixer — it reconstructs missing atoms before `pdb2gmx` runs.
+- **PyMOL trajectory**: `mset 1 xN` repeats state 1 N times (no movement). Use `mset 1 -N` to play states 1 through N sequentially. The script uses the correct form.
+- **MDAnalysis TPR version**: MDAnalysis 2.x may not support the newest GROMACS TPR format. The pipeline falls back to `md_ref.pdb` (protein-only) as topology when TPR loading fails.
+- **DSSP C-terminal atoms**: GROMACS names the C-terminal oxygens OC1/OC2. The pipeline renames them to O/OXT before running DSSP so backbone atom counts are equal.
 
 ### CLI
 ```bash
@@ -275,26 +309,23 @@ python3 run_md.py protein.pdb --ns 100                   # 100 ns production
 python3 run_md.py protein.pdb --steps prepare setup      # build inputs only
 python3 run_md.py protein.pdb --steps analyze visualize  # post-process only
 python3 run_md.py protein.pdb --ff charmm36m-iua --water tip4p
-python3 run_md.py protein.pdb --ncores 8 --gpu           # parallel/GPU run
-python3 run_md.py protein.pdb --ns 0.1 --nvt-ps 10 --npt-ps 10  # quick test run
+python3 run_md.py protein.pdb --ncores 8 --gpu
 ```
+
+### Test run: 6D1Y at 10 ns (AMBER99SB-ILDN/TIP3P, 300 K)
+- Backbone RMSD: 1.65 ± 0.26 Å (stable)
+- PCA: PC1 = 35.8%, PC2 = 12.8%, cumulative = 48.5%
+- DSSP: 101 frames × 320 residues
+- All 20 output files generated successfully
 
 ---
 
-## Usage Examples
-```bash
-# Single entry, PDB only (default)
-python3 download_pdb.py 1TIM
-
-# Multiple entries, all formats
-python3 download_pdb.py --pdb --cif --seq 1TIM 4HHB
-
-# IDs with suffixes are handled automatically
-python3 download_pdb.py 1TIM_2 4HHB_10
-
-# Batch from file
-python3 download_pdb.py --cif --from-file ids.txt
-
-# Custom output dir, force re-download
-python3 download_pdb.py --pdb --outdir ./my_structs --overwrite 1TIM
-```
+## Git History
+| Commit | Description |
+|---|---|
+| `125c467` | Initial commit: PDB downloader CLI |
+| `790a576` | Add full PDB toolkit (analysis, MD pipeline) |
+| `1025004` | Add ligand_rmsd.py |
+| `846c83e` | Add ligand_rmsd examples to examples.md |
+| `4b5c0f5` | Add requirements.txt |
+| `021afe0` | Add interactive toggles and residue panel to HTML viewer |
