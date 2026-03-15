@@ -33,8 +33,6 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 import numpy as np
-import py3Dmol
-
 from analyze_ligands import (
     Contact, HBond, LigandReport, PiInteraction, SaltBridge,
     SelectionParser, analyze_ligand, load_structure,
@@ -94,7 +92,7 @@ def _get_centroid(structure: Structure, chain: str,
 
 def _add_dashed_line(view, p1: np.ndarray, p2: np.ndarray,
                      color: str, n_dashes: int = 7, radius: float = 0.07):
-    """Simulate a dashed line with alternating cylinders."""
+    """Simulate a dashed line with alternating cylinders (py3Dmol notebook use)."""
     p1, p2 = np.asarray(p1, float), np.asarray(p2, float)
     for i in range(n_dashes):
         t0 = (2 * i)     / (2 * n_dashes)
@@ -112,13 +110,33 @@ def _add_dashed_line(view, p1: np.ndarray, p2: np.ndarray,
         })
 
 
+def _dashed_line_specs(p1: np.ndarray, p2: np.ndarray,
+                       color: str, n_dashes: int = 7,
+                       radius: float = 0.07) -> list[dict]:
+    """Return a list of 3Dmol.js cylinder spec dicts that form a dashed line."""
+    p1, p2 = np.asarray(p1, float), np.asarray(p2, float)
+    specs = []
+    for i in range(n_dashes):
+        t0 = (2 * i)     / (2 * n_dashes)
+        t1 = min((2 * i + 1) / (2 * n_dashes), 1.0)
+        s = (p1 + t0 * (p2 - p1)).tolist()
+        e = (p1 + t1 * (p2 - p1)).tolist()
+        specs.append({
+            "start": {"x": s[0], "y": s[1], "z": s[2]},
+            "end":   {"x": e[0], "y": e[1], "z": e[2]},
+            "radius": radius, "color": color,
+            "fromCap": 1, "toCap": 1,
+        })
+    return specs
+
+
 # ─── 3D HTML viewer (py3Dmol) ─────────────────────────────────────────────────
 
 def build_view(structure_path: str | Path,
                report: LigandReport,
                structure: Structure | None = None,
                width: int = 900,
-               height: int = 700) -> py3Dmol.view:
+               height: int = 700):
     """
     Build a py3Dmol view for a LigandReport.
 
@@ -138,6 +156,7 @@ def build_view(structure_path: str | Path,
     Configured py3Dmol.view object — call .show() in a notebook or
     pass to save_html() to write an HTML file.
     """
+    import py3Dmol
     structure_path = Path(structure_path)
     if structure is None:
         structure = load_structure(structure_path)
@@ -298,68 +317,439 @@ def save_html(structure_path: str | Path,
     -------
     Path to the saved HTML file.
     """
-    view = build_view(structure_path, report, structure, width, height)
-    html = _render_html(view, report, width, height)
+    structure_path = Path(structure_path)
+    if structure is None:
+        structure = load_structure(structure_path)
+    html = _render_html(structure_path, report, structure, width, height)
     output_path = Path(output_path)
     output_path.write_text(html)
     print(f"  Saved 3D viewer    → {output_path}")
     return output_path
 
 
-def _render_html(view: py3Dmol.view, report: LigandReport,
-                 width: int, height: int) -> str:
-    """Wrap py3Dmol view in a full HTML page with a legend."""
-    legend_items = [
-        ("Ligand",        _COLORS["ligand"]["hex"]),
-        ("Contacts",      _COLORS["contact"]["hex"]),
-        ("H-bonds",       _COLORS["hbond"]["hex"]),
-        ("Pi interaction",_COLORS["pi"]["hex"]),
-        ("Salt bridge (+)",_COLORS["salt_cat"]["hex"]),
-        ("Salt bridge (−)",_COLORS["salt_ani"]["hex"]),
-    ]
-    legend_html = "".join(
-        f'<span style="display:inline-block;width:14px;height:14px;'
-        f'background:{c};border-radius:3px;margin-right:5px;vertical-align:middle"></span>'
-        f'<span style="margin-right:16px;font-size:13px">{label}</span>'
-        for label, c in legend_items
+def _render_html(structure_path: Path, report: LigandReport,
+                 structure: Structure, width: int, height: int) -> str:
+    """
+    Generate a self-contained HTML page with:
+      - 3Dmol.js interactive viewer (loads from CDN, no py3Dmol needed)
+      - Per-type toggle buttons to show/hide contacts, H-bonds, pi, salt bridges
+      - Residue panel listing every interaction partner with atom names and distances
+    """
+    import json
+
+    lig_key = (report.ligand_chain, report.ligand_resi)
+    pdb_text = Path(structure_path).read_text()
+
+    # ── Per-type atom style lists  {sel, style} ──────────────────────────────
+    # These are applied in priority order in JS: contacts < pi < salt < hbonds
+    contact_atom_styles: list[dict] = []
+    hbond_atom_styles:   list[dict] = []
+    pi_atom_styles:      list[dict] = []
+    salt_atom_styles:    list[dict] = []
+
+    # ── Per-type shape specs (dashed lines) ───────────────────────────────────
+    hbond_shape_specs: list[dict] = []
+    pi_shape_specs:    list[dict] = []
+    salt_shape_specs:  list[dict] = []
+
+    # ── Per-type label specs ──────────────────────────────────────────────────
+    hbond_label_specs: list[dict] = []
+    pi_label_specs:    list[dict] = []
+    salt_label_specs:  list[dict] = []
+
+    # ── Side-panel HTML lists ─────────────────────────────────────────────────
+    contact_items: list[str] = []
+    hbond_items:   list[str] = []
+    pi_items:      list[str] = []
+    salt_items:    list[str] = []
+
+    # helper — deduplicated atom style append
+    def _atom_style(bucket: list, chain: str, resi: int, scheme: str, radius: float):
+        bucket.append({"sel": {"chain": chain, "resi": resi},
+                       "style": {"stick": {"colorscheme": scheme, "radius": radius}}})
+
+    def _label_spec(chain: str, resi: int, resn: str, bg: str) -> Optional[dict]:
+        coord = _get_atom_coord(structure, chain, resi, "CA")
+        if coord is None:
+            coord = _get_atom_coord(structure, chain, resi, "CB")
+        if coord is None:
+            return None
+        return {"text": f"{resn}{resi}",
+                "style": {"backgroundColor": bg, "fontColor": "white",
+                          "fontSize": 11, "showBackground": True,
+                          "borderThickness": 0},
+                "sel": {"chain": chain, "resi": resi, "atom": "CA"}}
+
+    # ── Contacts ──────────────────────────────────────────────────────────────
+    contact_residues: dict[tuple, dict] = {}
+    for c in report.contacts:
+        key = (c.chain2, c.resi2)
+        if key == lig_key:
+            continue
+        if key not in contact_residues:
+            contact_residues[key] = {"resn": c.resn2, "dists": []}
+        contact_residues[key]["dists"].append(c.distance)
+
+    seen_contact: set[tuple] = set()
+    for (chain, resi), info in sorted(contact_residues.items(), key=lambda x: x[0][1]):
+        if (chain, resi) not in seen_contact:
+            _atom_style(contact_atom_styles, chain, resi,
+                        _COLORS["contact"]["scheme"], 0.15)
+            seen_contact.add((chain, resi))
+        n = len(info["dists"])
+        min_d = min(info["dists"])
+        contact_items.append(
+            f'<li><span class="rn">{info["resn"]}{resi}:{chain}</span>'
+            f'<span class="dt">{n} contact{"s" if n>1 else ""} &nbsp;·&nbsp; min {min_d:.1f}&thinsp;Å</span></li>'
+        )
+
+    # ── H-bonds ───────────────────────────────────────────────────────────────
+    seen_hbond: set[tuple] = set()
+    hbond_label_seen: set[tuple] = set()
+    for hb in report.hbonds:
+        c1 = _get_atom_coord(structure, hb.donor_chain,    hb.donor_resi,    hb.donor_atom)
+        c2 = _get_atom_coord(structure, hb.acceptor_chain, hb.acceptor_resi, hb.acceptor_atom)
+        if c1 is not None and c2 is not None:
+            hbond_shape_specs.extend(
+                _dashed_line_specs(c1, c2, _DASH_COLORS["hbond"], radius=0.07))
+
+        for chain, resi, resn, scheme in [
+            (hb.donor_chain,    hb.donor_resi,    hb.donor_resn,
+             _COLORS["hbond"]["scheme"]),
+            (hb.acceptor_chain, hb.acceptor_resi, hb.acceptor_resn,
+             _COLORS["hbond"]["scheme"]),
+        ]:
+            key = (chain, resi)
+            if key == lig_key:
+                continue
+            if key not in seen_hbond:
+                _atom_style(hbond_atom_styles, chain, resi, scheme, 0.20)
+                seen_hbond.add(key)
+            if key not in hbond_label_seen:
+                spec = _label_spec(chain, resi, resn, _COLORS["hbond"]["hex"])
+                if spec:
+                    hbond_label_specs.append(spec)
+                hbond_label_seen.add(key)
+
+        # Build display strings for donor and acceptor sides
+        d_lig = (hb.donor_chain    == report.ligand_chain and
+                 hb.donor_resi     == report.ligand_resi)
+        a_lig = (hb.acceptor_chain == report.ligand_chain and
+                 hb.acceptor_resi  == report.ligand_resi)
+        if d_lig:
+            donor_str    = f'<span class="lig">{report.ligand_resn} ({hb.donor_atom})</span>'
+            acceptor_str = (f'<span class="rn">{hb.acceptor_resn}{hb.acceptor_resi}'
+                            f':{hb.acceptor_chain}</span>'
+                            f' <span class="at">({hb.acceptor_atom})</span>')
+        elif a_lig:
+            donor_str    = (f'<span class="rn">{hb.donor_resn}{hb.donor_resi}'
+                            f':{hb.donor_chain}</span>'
+                            f' <span class="at">({hb.donor_atom})</span>')
+            acceptor_str = f'<span class="lig">{report.ligand_resn} ({hb.acceptor_atom})</span>'
+        else:
+            donor_str    = (f'<span class="rn">{hb.donor_resn}{hb.donor_resi}'
+                            f':{hb.donor_chain}</span>'
+                            f' <span class="at">({hb.donor_atom})</span>')
+            acceptor_str = (f'<span class="rn">{hb.acceptor_resn}{hb.acceptor_resi}'
+                            f':{hb.acceptor_chain}</span>'
+                            f' <span class="at">({hb.acceptor_atom})</span>')
+        hbond_items.append(
+            f'<li>{donor_str} <span class="arrow">→</span> {acceptor_str}'
+            f' <span class="dt">{hb.distance:.1f}&thinsp;Å</span></li>'
+        )
+
+    # ── Pi interactions ───────────────────────────────────────────────────────
+    seen_pi: set[tuple] = set()
+    pi_label_seen: set[tuple] = set()
+    for pi in report.pi_interactions:
+        atoms1 = pi.ring1_label.split(",")
+        atoms2 = pi.ring2_label.split(",")
+        c1 = (_get_atom_coord(structure, pi.chain1, pi.resi1, atoms1[0])
+              if pi.subtype == "cation_pi"
+              else _get_centroid(structure, pi.chain1, pi.resi1, atoms1))
+        c2 = _get_centroid(structure, pi.chain2, pi.resi2, atoms2)
+        if c1 is not None and c2 is not None:
+            pi_shape_specs.extend(
+                _dashed_line_specs(c1, c2, _DASH_COLORS["pi"], radius=0.06))
+
+        for chain, resi, resn in [(pi.chain1, pi.resi1, pi.resn1),
+                                   (pi.chain2, pi.resi2, pi.resn2)]:
+            key = (chain, resi)
+            if key == lig_key:
+                continue
+            if key not in seen_pi:
+                _atom_style(pi_atom_styles, chain, resi,
+                            _COLORS["pi"]["scheme"], 0.20)
+                seen_pi.add(key)
+            if key not in pi_label_seen:
+                spec = _label_spec(chain, resi, resn, _COLORS["pi"]["hex"])
+                if spec:
+                    pi_label_specs.append(spec)
+                pi_label_seen.add(key)
+
+        subtype_label = pi.subtype.replace("_", "-")
+        # Identify the protein residue (non-ligand side)
+        if (pi.chain1, pi.resi1) != lig_key:
+            prot_str = (f'<span class="rn">{pi.resn1}{pi.resi1}:{pi.chain1}</span>')
+        else:
+            prot_str = (f'<span class="rn">{pi.resn2}{pi.resi2}:{pi.chain2}</span>')
+        pi_items.append(
+            f'<li>{prot_str} <span class="at">{subtype_label}</span>'
+            f' <span class="dt">{pi.center_distance:.1f}&thinsp;Å</span></li>'
+        )
+
+    # ── Salt bridges ──────────────────────────────────────────────────────────
+    seen_salt: set[tuple] = set()
+    salt_label_seen: set[tuple] = set()
+    for sb in report.salt_bridges:
+        c1 = _get_atom_coord(structure, sb.cation_chain, sb.cation_resi, sb.cation_atom)
+        c2 = _get_atom_coord(structure, sb.anion_chain,  sb.anion_resi,  sb.anion_atom)
+        if c1 is not None and c2 is not None:
+            salt_shape_specs.extend(
+                _dashed_line_specs(c1, c2, _DASH_COLORS["salt"], radius=0.06))
+
+        for chain, resi, resn, scheme, bg, role in [
+            (sb.cation_chain, sb.cation_resi, sb.cation_resn,
+             _COLORS["salt_cat"]["scheme"], _COLORS["salt_cat"]["hex"], "+"),
+            (sb.anion_chain,  sb.anion_resi,  sb.anion_resn,
+             _COLORS["salt_ani"]["scheme"], _COLORS["salt_ani"]["hex"], "−"),
+        ]:
+            key = (chain, resi)
+            if key == lig_key:
+                continue
+            if key not in seen_salt:
+                _atom_style(salt_atom_styles, chain, resi, scheme, 0.20)
+                seen_salt.add(key)
+            if key not in salt_label_seen:
+                spec = _label_spec(chain, resi, resn, bg)
+                if spec:
+                    salt_label_specs.append(spec)
+                salt_label_seen.add(key)
+
+        salt_items.append(
+            f'<li>'
+            f'<span class="rn">{sb.cation_resn}{sb.cation_resi}:{sb.cation_chain}</span>'
+            f' <span class="at role-pos">(+) {sb.cation_atom}</span>'
+            f' <span class="arrow">↔</span> '
+            f'<span class="at role-neg">{sb.anion_atom} (−)</span>'
+            f'<span class="rn">{sb.anion_resn}{sb.anion_resi}:{sb.anion_chain}</span>'
+            f' <span class="dt">{sb.distance:.1f}&thinsp;Å</span></li>'
+        )
+
+    # ── Side panel HTML sections ──────────────────────────────────────────────
+    def _section(title: str, color: str, items: list[str], tid: str) -> str:
+        count = f" ({len(items)})" if items else ""
+        body  = (f"<ul>{''.join(items)}</ul>" if items
+                 else '<p class="empty">None detected</p>')
+        return (f'<div class="isect" id="list-{tid}">'
+                f'<div class="isect-title" style="color:{color}">{title}{count}</div>'
+                f'{body}</div>')
+
+    panel_html = (
+        _section("Contacts",       _COLORS["contact"]["hex"],  contact_items, "contacts") +
+        _section("H-bonds",        _COLORS["hbond"]["hex"],    hbond_items,   "hbonds")   +
+        _section("Pi interactions",_COLORS["pi"]["hex"],       pi_items,      "pi")       +
+        _section("Salt bridges",   _COLORS["salt_cat"]["hex"], salt_items,    "salt")
     )
 
-    title = (f"{report.ligand_resn} {report.ligand_chain}:{report.ligand_resi} — "
-             f"{report.n_contacts} contacts · {report.n_hbonds} H-bonds · "
-             f"{report.n_pi} pi · {report.n_salt_bridges} salt bridges")
+    # ── Header subtitle ───────────────────────────────────────────────────────
+    subtitle = (f"{report.ligand_resn} {report.ligand_chain}:{report.ligand_resi}"
+                f" &nbsp;·&nbsp; {report.n_contacts} contacts"
+                f" &nbsp;·&nbsp; {report.n_hbonds} H-bonds"
+                f" &nbsp;·&nbsp; {report.n_pi} pi"
+                f" &nbsp;·&nbsp; {report.n_salt_bridges} salt bridges")
 
-    # Extract the inner viewer HTML from py3Dmol
-    inner = view._make_html()
+    # ── Serialise data for JS ─────────────────────────────────────────────────
+    J = json.dumps
+    water_js = J(sorted(WATER_NAMES))
 
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
 <title>{report.ligand_resn} Interactions</title>
+<script src="https://3dmol.org/build/3Dmol-min.js"></script>
 <style>
-  body {{ font-family: Arial, sans-serif; margin: 0; background: #f5f5f5; }}
-  .header {{ background: #2c3e50; color: white; padding: 12px 20px; }}
-  .header h2 {{ margin: 0 0 6px 0; font-size: 16px; }}
-  .legend {{ padding: 8px 20px; background: white; border-bottom: 1px solid #ddd; }}
-  .viewer {{ display: flex; justify-content: center; padding: 10px; }}
-  iframe {{ border: none; border-radius: 4px; box-shadow: 0 2px 8px rgba(0,0,0,0.15); }}
+* {{ box-sizing: border-box; margin: 0; padding: 0; }}
+body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        background: #f0f2f5; color: #222; height: 100vh; display: flex;
+        flex-direction: column; overflow: hidden; }}
+.header {{ background: #1e2d3e; color: white; padding: 10px 18px;
+           flex-shrink: 0; }}
+.header h2 {{ font-size: 15px; margin-bottom: 3px; }}
+.subtitle  {{ font-size: 12px; opacity: 0.8; }}
+.body {{ display: flex; flex: 1; overflow: hidden; }}
+#viewer-wrap {{ flex: 1; position: relative; background: white; }}
+#viewer {{ width: 100%; height: 100%; position: absolute; }}
+.panel {{ width: 290px; flex-shrink: 0; background: white;
+          border-left: 1px solid #dde; display: flex; flex-direction: column;
+          overflow: hidden; }}
+.toggles {{ padding: 10px 12px; border-bottom: 1px solid #eee; flex-shrink: 0; }}
+.toggles-title {{ font-size: 11px; font-weight: 700; letter-spacing: .06em;
+                  color: #888; text-transform: uppercase; margin-bottom: 8px; }}
+.tog-row {{ display: flex; align-items: center; gap: 8px;
+            margin-bottom: 5px; cursor: pointer; }}
+.tog-row input {{ cursor: pointer; accent-color: #4a90d9; width: 15px; height: 15px; }}
+.tog-label {{ font-size: 13px; display: flex; align-items: center; gap: 5px; }}
+.tog-dot {{ width: 11px; height: 11px; border-radius: 50%; flex-shrink: 0; }}
+.tog-actions {{ display: flex; gap: 6px; margin-top: 8px; }}
+.tog-btn {{ font-size: 11px; padding: 2px 8px; border: 1px solid #ccc;
+            border-radius: 3px; cursor: pointer; background: #f7f7f7; }}
+.tog-btn:hover {{ background: #eee; }}
+.residues {{ flex: 1; overflow-y: auto; padding: 8px 12px; }}
+.isect {{ margin-bottom: 12px; }}
+.isect-title {{ font-size: 12px; font-weight: 700; margin-bottom: 5px;
+                padding-bottom: 3px; border-bottom: 2px solid currentColor; }}
+.isect ul {{ list-style: none; padding: 0; }}
+.isect li {{ font-size: 12px; padding: 3px 0; border-bottom: 1px solid #f2f2f2;
+             line-height: 1.5; }}
+.rn   {{ font-weight: 600; font-family: monospace; }}
+.lig  {{ font-weight: 600; font-family: monospace; color: #b89000; }}
+.at   {{ color: #666; font-size: 11px; }}
+.dt   {{ color: #888; font-size: 11px; float: right; }}
+.arrow {{ color: #aaa; }}
+.role-pos {{ color: #4488ff; }}
+.role-neg {{ color: #ff4444; }}
+.empty {{ font-size: 12px; color: #aaa; font-style: italic; }}
 </style>
 </head>
 <body>
 <div class="header">
   <h2>Interaction Viewer</h2>
-  <div style="font-size:13px;opacity:0.9">{title}</div>
+  <div class="subtitle">{subtitle}</div>
 </div>
-<div class="legend">{legend_html}</div>
-<div class="viewer">
-  <iframe srcdoc="{_escape(inner)}" width="{width}" height="{height}"></iframe>
+<div class="body">
+  <div id="viewer-wrap"><div id="viewer"></div></div>
+  <div class="panel">
+    <div class="toggles">
+      <div class="toggles-title">Show / Hide</div>
+      <label class="tog-row">
+        <input type="checkbox" id="tog-contacts" checked onchange="updateScene()">
+        <span class="tog-label">
+          <span class="tog-dot" style="background:{_COLORS['contact']['hex']}"></span>
+          Contacts ({len(contact_items)})
+        </span>
+      </label>
+      <label class="tog-row">
+        <input type="checkbox" id="tog-hbonds" checked onchange="updateScene()">
+        <span class="tog-label">
+          <span class="tog-dot" style="background:{_COLORS['hbond']['hex']}"></span>
+          H-bonds ({len(hbond_items)})
+        </span>
+      </label>
+      <label class="tog-row">
+        <input type="checkbox" id="tog-pi" checked onchange="updateScene()">
+        <span class="tog-label">
+          <span class="tog-dot" style="background:{_COLORS['pi']['hex']}"></span>
+          Pi interactions ({len(pi_items)})
+        </span>
+      </label>
+      <label class="tog-row">
+        <input type="checkbox" id="tog-salt" checked onchange="updateScene()">
+        <span class="tog-label">
+          <span class="tog-dot" style="background:{_COLORS['salt_cat']['hex']}"></span>
+          Salt bridges ({len(salt_items)})
+        </span>
+      </label>
+      <div class="tog-actions">
+        <button class="tog-btn" onclick="setAll(true)">Show all</button>
+        <button class="tog-btn" onclick="setAll(false)">Hide all</button>
+      </div>
+    </div>
+    <div class="residues">{panel_html}</div>
+  </div>
 </div>
+<script>
+var PDB_DATA   = {J(pdb_text)};
+var LIG_CHAIN  = {J(report.ligand_chain)};
+var LIG_RESI   = {report.ligand_resi};
+var WATER_NAMES= {water_js};
+
+var atomStyles = {{
+  contacts: {J(contact_atom_styles)},
+  hbonds:   {J(hbond_atom_styles)},
+  pi:       {J(pi_atom_styles)},
+  salt:     {J(salt_atom_styles)}
+}};
+var shapeSpecs = {{
+  hbonds: {J(hbond_shape_specs)},
+  pi:     {J(pi_shape_specs)},
+  salt:   {J(salt_shape_specs)}
+}};
+var labelSpecs = {{
+  hbonds: {J(hbond_label_specs)},
+  pi:     {J(pi_label_specs)},
+  salt:   {J(salt_label_specs)}
+}};
+
+var viewer;
+
+function updateScene() {{
+  // 1. Reset: base cartoon
+  viewer.setStyle({{}}, {{cartoon: {{color: "#b8b8b8", opacity: 0.75}}}});
+  viewer.setStyle({{resn: WATER_NAMES}}, {{}});
+
+  // 2. Ligand always on
+  viewer.setStyle({{chain: LIG_CHAIN, resi: LIG_RESI}},
+                  {{stick: {{colorscheme: "yellowCarbon", radius: 0.25}}}});
+
+  // 3. Atom styles in ascending priority (hbonds last → wins)
+  ["contacts","pi","salt","hbonds"].forEach(function(t) {{
+    if (document.getElementById("tog-"+t).checked) {{
+      atomStyles[t].forEach(function(item) {{
+        viewer.addStyle(item.sel, item.style);
+      }});
+    }}
+  }});
+
+  // 4. Shapes (dashed lines)
+  viewer.removeAllShapes();
+  ["hbonds","pi","salt"].forEach(function(t) {{
+    if (document.getElementById("tog-"+t).checked) {{
+      shapeSpecs[t].forEach(function(spec) {{
+        viewer.addCylinder(spec);
+      }});
+    }}
+  }});
+
+  // 5. Labels
+  viewer.removeAllLabels();
+  ["hbonds","pi","salt"].forEach(function(t) {{
+    if (document.getElementById("tog-"+t).checked) {{
+      labelSpecs[t].forEach(function(spec) {{
+        viewer.addLabel(spec.text, spec.style, spec.sel);
+      }});
+    }}
+  }});
+
+  viewer.render();
+
+  // 6. Side panel sections
+  ["contacts","hbonds","pi","salt"].forEach(function(t) {{
+    var el = document.getElementById("list-"+t);
+    if (el) el.style.display =
+      document.getElementById("tog-"+t).checked ? "" : "none";
+  }});
+}}
+
+function setAll(on) {{
+  ["contacts","hbonds","pi","salt"].forEach(function(t) {{
+    document.getElementById("tog-"+t).checked = on;
+  }});
+  updateScene();
+}}
+
+window.addEventListener("DOMContentLoaded", function() {{
+  viewer = $3Dmol.createViewer(document.getElementById("viewer"),
+                               {{backgroundColor: "white"}});
+  viewer.addModel(PDB_DATA, "pdb");
+  updateScene();
+  viewer.zoomTo({{chain: LIG_CHAIN, resi: LIG_RESI}});
+  viewer.render();
+}});
+</script>
 </body>
 </html>"""
-
-
-def _escape(s: str) -> str:
-    return s.replace("&", "&amp;").replace('"', "&quot;")
 
 
 # ─── 2D interaction fingerprint (matplotlib) ──────────────────────────────────
