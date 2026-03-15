@@ -35,7 +35,7 @@ import matplotlib.patches as mpatches
 import numpy as np
 from analyze_ligands import (
     Contact, HBond, LigandReport, PiInteraction, SaltBridge,
-    SelectionParser, analyze_ligand, load_structure,
+    SelectionParser, analyze_ligand, load_structure, primary_ligands,
     WATER_NAMES,
 )
 from Bio.PDB.Structure import Structure
@@ -56,6 +56,31 @@ _DASH_COLORS = {
     "pi":    "#ff44ff",
     "salt":  "#ff8800",
 }
+
+_CPK_COLORS = {
+    "C": "#404040", "N": "#3050F8", "O": "#FF0D0D", "S": "#FFFF30",
+    "P": "#FF8000", "F": "#90E050", "CL": "#1FF01F", "BR": "#A62929",
+    "I": "#940094", "H": "#FFFFFF", "FE": "#E06633", "ZN": "#7D80B0",
+    "MG": "#8AFF00", "CA": "#3DFF00", "MN": "#9C7AC7", "CU": "#C88033",
+}
+
+
+def _draw_spoked_arc(ax, res_pos: np.ndarray, direction: np.ndarray,
+                     outer_r: float = 0.45, n_spokes: int = 6) -> None:
+    """Draw a LIGPLOT-style spoked semicircle indicating a hydrophobic contact."""
+    angle_to_lig = np.degrees(np.arctan2(direction[1], direction[0]))
+    arc_rad = np.radians(np.linspace(angle_to_lig - 70, angle_to_lig + 70, 60))
+    ax.plot(res_pos[0] + outer_r * np.cos(arc_rad),
+            res_pos[1] + outer_r * np.sin(arc_rad),
+            "-", color="#999999", linewidth=1.4, zorder=1)
+    inner_r = outer_r * 0.45
+    for theta_deg in np.linspace(angle_to_lig - 60, angle_to_lig + 60, n_spokes):
+        theta = np.radians(theta_deg)
+        ax.plot([res_pos[0] + inner_r * np.cos(theta),
+                 res_pos[0] + outer_r * np.cos(theta)],
+                [res_pos[1] + inner_r * np.sin(theta),
+                 res_pos[1] + outer_r * np.sin(theta)],
+                "-", color="#999999", linewidth=0.8, zorder=1)
 
 
 # ─── Geometry helpers ─────────────────────────────────────────────────────────
@@ -293,7 +318,8 @@ def save_html(structure_path: str | Path,
               output_path: str | Path,
               structure: Structure | None = None,
               width: int = 900,
-              height: int = 700) -> Path:
+              height: int = 700,
+              active_types: set[str] | None = None) -> Path:
     """
     Save an interactive 3D HTML viewer for a LigandReport.
 
@@ -320,7 +346,7 @@ def save_html(structure_path: str | Path,
     structure_path = Path(structure_path)
     if structure is None:
         structure = load_structure(structure_path)
-    html = _render_html(structure_path, report, structure, width, height)
+    html = _render_html(structure_path, report, structure, width, height, active_types)
     output_path = Path(output_path)
     output_path.write_text(html)
     print(f"  Saved 3D viewer    → {output_path}")
@@ -328,7 +354,8 @@ def save_html(structure_path: str | Path,
 
 
 def _render_html(structure_path: Path, report: LigandReport,
-                 structure: Structure, width: int, height: int) -> str:
+                 structure: Structure, width: int, height: int,
+                 active_types: set[str] | None = None) -> str:
     """
     Generate a self-contained HTML page with:
       - 3Dmol.js interactive viewer (loads from CDN, no py3Dmol needed)
@@ -562,6 +589,10 @@ def _render_html(structure_path: Path, report: LigandReport,
     # ── Serialise data for JS ─────────────────────────────────────────────────
     J = json.dumps
     water_js = J(sorted(WATER_NAMES))
+    # active_types controls which checkboxes start checked (None = all checked)
+    _all = active_types is None
+    def _chk(t: str) -> str:
+        return "checked" if (_all or t in active_types) else ""
 
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -624,28 +655,28 @@ body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     <div class="toggles">
       <div class="toggles-title">Show / Hide</div>
       <label class="tog-row">
-        <input type="checkbox" id="tog-contacts" checked onchange="updateScene()">
+        <input type="checkbox" id="tog-contacts" {_chk("contacts")} onchange="updateScene()">
         <span class="tog-label">
           <span class="tog-dot" style="background:{_COLORS['contact']['hex']}"></span>
           Contacts ({len(contact_items)})
         </span>
       </label>
       <label class="tog-row">
-        <input type="checkbox" id="tog-hbonds" checked onchange="updateScene()">
+        <input type="checkbox" id="tog-hbonds" {_chk("hbonds")} onchange="updateScene()">
         <span class="tog-label">
           <span class="tog-dot" style="background:{_COLORS['hbond']['hex']}"></span>
           H-bonds ({len(hbond_items)})
         </span>
       </label>
       <label class="tog-row">
-        <input type="checkbox" id="tog-pi" checked onchange="updateScene()">
+        <input type="checkbox" id="tog-pi" {_chk("pi")} onchange="updateScene()">
         <span class="tog-label">
           <span class="tog-dot" style="background:{_COLORS['pi']['hex']}"></span>
           Pi interactions ({len(pi_items)})
         </span>
       </label>
       <label class="tog-row">
-        <input type="checkbox" id="tog-salt" checked onchange="updateScene()">
+        <input type="checkbox" id="tog-salt" {_chk("salt")} onchange="updateScene()">
         <span class="tog-label">
           <span class="tog-dot" style="background:{_COLORS['salt_cat']['hex']}"></span>
           Salt bridges ({len(salt_items)})
@@ -755,7 +786,8 @@ window.addEventListener("DOMContentLoaded", function() {{
 # ─── 2D interaction fingerprint (matplotlib) ──────────────────────────────────
 
 def plot_interaction_summary(report: LigandReport,
-                              output_path: str | Path) -> Path:
+                              output_path: str | Path,
+                              types: list[str] | None = None) -> Path:
     """
     Save a 2D interaction fingerprint chart for a LigandReport.
 
@@ -768,12 +800,16 @@ def plot_interaction_summary(report: LigandReport,
         LigandReport from analyze_ligand().
     output_path :
         Output PNG (or any matplotlib-supported format) path.
+    types :
+        Subset of ["contact","hbond","pi","salt"] to include.  None = all.
 
     Returns
     -------
     Path to the saved image.
     """
     lig_key = (report.ligand_chain, report.ligand_resi)
+    all_types = ["contact", "hbond", "pi", "salt"]
+    show_types = types if types is not None else all_types
 
     # ── Aggregate per residue ─────────────────────────────────────────────────
     data: dict[tuple, dict] = defaultdict(
@@ -816,13 +852,25 @@ def plot_interaction_summary(report: LigandReport,
         print("  No interactions to plot.")
         return Path(output_path)
 
-    # Sort by residue number
-    residue_keys = sorted(data.keys(), key=lambda k: k[1])
+    # Sort by residue number; filter to rows that have any data for show_types
+    residue_keys = sorted(
+        [k for k in data if any(data[k][t] for t in show_types)],
+        key=lambda k: k[1],
+    )
+    if not residue_keys:
+        print("  No interactions to plot for the requested types.")
+        return Path(output_path)
+
     row_labels = [f"{data[k]['resn']}{k[1]}:{k[0]}" for k in residue_keys]
-    itypes = ["contact", "hbond", "pi", "salt"]
-    col_labels = ["Contacts", "H-bonds", "Pi", "Salt bridges"]
-    dot_colors = [_COLORS["contact"]["hex"], _COLORS["hbond"]["hex"],
-                  _COLORS["pi"]["hex"],      _COLORS["salt_cat"]["hex"]]
+    _type_meta = {
+        "contact": ("Contacts",     _COLORS["contact"]["hex"]),
+        "hbond":   ("H-bonds",      _COLORS["hbond"]["hex"]),
+        "pi":      ("Pi",           _COLORS["pi"]["hex"]),
+        "salt":    ("Salt bridges", _COLORS["salt_cat"]["hex"]),
+    }
+    itypes     = show_types
+    col_labels = [_type_meta[t][0] for t in itypes]
+    dot_colors = [_type_meta[t][1] for t in itypes]
 
     n_res = len(residue_keys)
     fig_h = max(5, n_res * 0.38 + 2.5)
@@ -842,7 +890,7 @@ def plot_interaction_summary(report: LigandReport,
             min_d = min(dists)
             # Larger dot = more contacts; darker = closer
             size = 80 + count * 60
-            alpha = max(0.5, 1.0 - (min_d - 2.0) / 4.0)
+            alpha = min(1.0, max(0.5, 1.0 - (min_d - 2.0) / 4.0))
             ax_dot.scatter(xi, yi, s=size, c=dot_colors[xi],
                            alpha=alpha, zorder=4,
                            edgecolors="white", linewidths=0.8)
@@ -896,10 +944,292 @@ def plot_interaction_summary(report: LigandReport,
     return output_path
 
 
+# ─── LIGPLOT-style 2D diagram ─────────────────────────────────────────────────
+
+def plot_ligand_2d(structure_path: str | Path,
+                   report: LigandReport,
+                   output_path: str | Path,
+                   structure: Structure | None = None) -> Path:
+    """
+    Save a LIGPLOT-style 2D interaction diagram.
+
+    Ligand heavy atoms are projected onto their best-fit plane via SVD and
+    drawn as a 2D stick diagram with CPK atom colouring.  Interacting protein
+    residues are placed evenly around the periphery as labelled colour-coded
+    boxes.  Contacts use the classic LIGPLOT spoked-arc motif; H-bonds, pi
+    interactions, and salt bridges are drawn as dashed lines.
+
+    Parameters
+    ----------
+    structure_path :
+        Path to the PDB or CIF file.
+    report :
+        LigandReport from analyze_ligand().
+    output_path :
+        Output PNG file path.
+    structure :
+        Pre-loaded BioPython Structure (optional).
+
+    Returns
+    -------
+    Path to the saved PNG.
+    """
+    from matplotlib.lines import Line2D
+
+    structure_path = Path(structure_path)
+    if structure is None:
+        structure = load_structure(structure_path)
+
+    # ── Collect ligand heavy atoms ─────────────────────────────────────────────
+    lig_atoms: list[tuple[str, str, np.ndarray]] = []   # (element, name, coord)
+    for model in structure:
+        for ch in model:
+            if ch.id != report.ligand_chain:
+                continue
+            for res in ch:
+                if res.id[1] != report.ligand_resi:
+                    continue
+                for atom in res:
+                    elem = (atom.element or atom.get_name()[0]).strip().upper()
+                    if elem and elem != "H":
+                        lig_atoms.append((elem, atom.get_name().strip(),
+                                          atom.get_vector().get_array()))
+        break  # first model only
+
+    if not lig_atoms:
+        print("  No ligand heavy atoms found for 2D diagram.")
+        return Path(output_path)
+
+    # ── Project to 2D via SVD ──────────────────────────────────────────────────
+    coords_3d   = np.array([a[2] for a in lig_atoms])
+    centroid_3d = coords_3d.mean(axis=0)
+    centered    = coords_3d - centroid_3d
+
+    if centered.shape[0] >= 3:
+        _, _, Vt = np.linalg.svd(centered)
+        ax1, ax2 = Vt[0], Vt[1]
+    else:
+        ax1, ax2 = np.array([1, 0, 0]), np.array([0, 1, 0])
+
+    lig_2d = np.column_stack([centered @ ax1, centered @ ax2])
+    scale  = max(np.linalg.norm(lig_2d, axis=1).max(), 0.1)
+    lig_2d /= scale          # normalise to ~unit circle
+
+    # ── Infer covalent bonds (<1.9 Å between heavy atoms in 3D) ──────────────
+    bonds: list[tuple[int, int]] = []
+    for i in range(len(lig_atoms)):
+        for j in range(i + 1, len(lig_atoms)):
+            if np.linalg.norm(coords_3d[i] - coords_3d[j]) < 1.9:
+                bonds.append((i, j))
+
+    # ── Collect interacting residues and their interaction types ──────────────
+    lig_key = (report.ligand_chain, report.ligand_resi)
+    res_types: dict[tuple, set[str]] = defaultdict(set)
+    res_names: dict[tuple, str]      = {}
+
+    for c in report.contacts:
+        key = (c.chain2, c.resi2)
+        if key != lig_key:
+            res_types[key].add("contact");  res_names[key] = c.resn2
+    for h in report.hbonds:
+        for key, resn in [((h.donor_chain,    h.donor_resi),    h.donor_resn),
+                           ((h.acceptor_chain, h.acceptor_resi), h.acceptor_resn)]:
+            if key != lig_key:
+                res_types[key].add("hbond");  res_names[key] = resn
+    for p in report.pi_interactions:
+        for key, resn in [((p.chain1, p.resi1), p.resn1),
+                           ((p.chain2, p.resi2), p.resn2)]:
+            if key != lig_key:
+                res_types[key].add("pi");  res_names[key] = resn
+    for s in report.salt_bridges:
+        for key, resn in [((s.cation_chain, s.cation_resi), s.cation_resn),
+                           ((s.anion_chain,  s.anion_resi),  s.anion_resn)]:
+            if key != lig_key:
+                res_types[key].add("salt");  res_names[key] = resn
+
+    if not res_types:
+        print("  No interactions found for 2D diagram.")
+        return Path(output_path)
+
+    # ── Place residues evenly around a circle ─────────────────────────────────
+    res_keys = sorted(res_types.keys(), key=lambda k: k[1])
+    n_res    = len(res_keys)
+    RING_R   = 2.3
+    angles   = np.linspace(0, 2 * np.pi, n_res, endpoint=False) - np.pi / 2
+    res_pos: dict[tuple, np.ndarray] = {
+        key: np.array([RING_R * np.cos(a), RING_R * np.sin(a)])
+        for key, a in zip(res_keys, angles)
+    }
+
+    # ── Figure setup ──────────────────────────────────────────────────────────
+    fig_size = min(max(9, 2.5 + n_res * 0.5), 18)
+    fig, ax  = plt.subplots(figsize=(fig_size, fig_size))
+    ax.set_aspect("equal");  ax.axis("off")
+    lim = RING_R + 1.2
+    ax.set_xlim(-lim, lim);  ax.set_ylim(-lim, lim)
+    ax.set_title(
+        f"LIGPLOT-style 2D Diagram\n"
+        f"{report.ligand_resn} {report.ligand_chain}:{report.ligand_resi}",
+        fontsize=12, fontweight="bold", pad=12,
+    )
+
+    # ── Draw interaction lines (behind everything) ────────────────────────────
+    origin = np.array([0.0, 0.0])
+    for key in res_keys:
+        types  = res_types[key]
+        rpos   = res_pos[key]
+        direc  = origin - rpos
+        d_norm = np.linalg.norm(direc)
+        if d_norm > 0:
+            direc /= d_norm
+
+        if "hbond" in types:
+            color, ls, lw = _DASH_COLORS["hbond"], "--", 1.8
+        elif "salt" in types:
+            color, ls, lw = _DASH_COLORS["salt"],  "--", 1.8
+        elif "pi" in types:
+            color, ls, lw = _DASH_COLORS["pi"],    "--", 1.6
+        else:
+            color, ls, lw = "#999999",              "-",  1.0
+
+        ax.plot([origin[0], rpos[0]], [origin[1], rpos[1]],
+                ls, color=color, linewidth=lw, zorder=1, alpha=0.85)
+
+        if types == {"contact"}:          # pure hydrophobic → spoked arc
+            _draw_spoked_arc(ax, rpos, direc)
+
+    # ── Draw ligand bonds ─────────────────────────────────────────────────────
+    for i, j in bonds:
+        ax.plot([lig_2d[i, 0], lig_2d[j, 0]],
+                [lig_2d[i, 1], lig_2d[j, 1]],
+                "k-", linewidth=2.0, solid_capstyle="round", zorder=2)
+
+    # ── Draw ligand atoms ─────────────────────────────────────────────────────
+    ATOM_R = 0.13
+    for idx, (elem, _name, _) in enumerate(lig_atoms):
+        color = _CPK_COLORS.get(elem, _CPK_COLORS.get(elem[:1], "#FF1493"))
+        x, y  = lig_2d[idx]
+        ax.add_patch(plt.Circle((x, y), ATOM_R, color=color,
+                                zorder=3, ec="#222222", lw=0.6))
+        if elem != "C":
+            ax.text(x, y + ATOM_R + 0.07, elem, ha="center", va="bottom",
+                    fontsize=6.5, color="#222", zorder=4, fontweight="bold")
+
+    # ── Draw residue boxes ────────────────────────────────────────────────────
+    for key in res_keys:
+        types = res_types[key]
+        rpos  = res_pos[key]
+        label = f"{res_names.get(key,'?')}{key[1]}:{key[0]}"
+        if "hbond" in types:
+            bg = _COLORS["hbond"]["hex"]
+        elif "salt" in types:
+            bg = _COLORS["salt_cat"]["hex"]
+        elif "pi" in types:
+            bg = _COLORS["pi"]["hex"]
+        else:
+            bg = "#777777"
+        ax.text(rpos[0], rpos[1], label,
+                ha="center", va="center", fontsize=8.5,
+                fontfamily="monospace", fontweight="bold", color="white",
+                bbox=dict(boxstyle="round,pad=0.38", facecolor=bg,
+                          edgecolor="white", linewidth=1.5),
+                zorder=5)
+
+    # ── Legend ─────────────────────────────────────────────────────────────────
+    legend_items = [
+        Line2D([0], [0], ls="--", color=_DASH_COLORS["hbond"], lw=1.8,
+               label="H-bond"),
+        Line2D([0], [0], ls="--", color=_DASH_COLORS["pi"],    lw=1.6,
+               label="Pi interaction"),
+        Line2D([0], [0], ls="--", color=_DASH_COLORS["salt"],  lw=1.8,
+               label="Salt bridge"),
+        Line2D([0], [0], ls="-",  color="#999999",              lw=1.0,
+               label="Hydrophobic contact"),
+    ]
+    ax.legend(handles=legend_items, loc="lower right", fontsize=8.5,
+              framealpha=0.9, edgecolor="#cccccc")
+
+    plt.tight_layout()
+    output_path = Path(output_path)
+    plt.savefig(output_path, dpi=150, bbox_inches="tight", facecolor="white")
+    plt.close()
+    print(f"  Saved 2D diagram   → {output_path}")
+    return output_path
+
+
+# ─── Per-interaction-type separate images ─────────────────────────────────────
+
+def save_type_images(structure_path: str | Path,
+                     report: LigandReport,
+                     outdir: str | Path,
+                     stem: str,
+                     structure: Structure | None = None,
+                     width: int = 900,
+                     height: int = 700) -> list[dict]:
+    """
+    Generate per-interaction-type HTML viewers and filtered fingerprint PNGs.
+
+    For each interaction type that has at least one detected interaction, writes:
+      - ``{stem}_{type}.html``        — 3D viewer with only that type pre-checked
+      - ``{stem}_{type}_fingerprint.png`` — fingerprint filtered to that type
+
+    Parameters
+    ----------
+    structure_path :
+        PDB or CIF file.
+    report :
+        LigandReport from analyze_ligand().
+    outdir :
+        Output directory (must already exist).
+    stem :
+        Filename stem (e.g. ``"ATP_A501"``).
+    structure :
+        Pre-loaded BioPython Structure (optional).
+    width, height :
+        HTML viewer dimensions.
+
+    Returns
+    -------
+    List of dicts with keys ``"type"``, ``"html"``, ``"png"`` per type generated.
+    """
+    structure_path = Path(structure_path)
+    outdir         = Path(outdir)
+    if structure is None:
+        structure = load_structure(structure_path)
+
+    # Map HTML type-id → (interaction list, filter key for fingerprint)
+    type_map = [
+        ("contacts", report.contacts,        ["contact"]),
+        ("hbonds",   report.hbonds,          ["hbond"]),
+        ("pi",       report.pi_interactions, ["pi"]),
+        ("salt",     report.salt_bridges,    ["salt"]),
+    ]
+
+    results = []
+    for type_id, items, filter_keys in type_map:
+        if not items:
+            continue
+
+        # Type-specific 3D HTML (only this checkbox pre-checked)
+        html_path = outdir / f"{stem}_{type_id}.html"
+        html = _render_html(structure_path, report, structure, width, height,
+                            active_types={type_id})
+        html_path.write_text(html)
+        print(f"  Saved {type_id:<10} HTML → {html_path}")
+
+        # Type-specific fingerprint PNG (only matching columns shown)
+        png_path = outdir / f"{stem}_{type_id}_fingerprint.png"
+        plot_interaction_summary(report, png_path, types=filter_keys)
+
+        results.append({"type": type_id, "html": html_path, "png": png_path})
+
+    return results
+
+
 # ─── High-level entry point ────────────────────────────────────────────────────
 
 def visualize(structure_path: str | Path,
-              ligand_sel: str,
+              ligand_sel: str | None = None,
               protein_sel: str = "polymer",
               outdir: str | Path = ".",
               prefix: str = "",
@@ -914,7 +1244,8 @@ def visualize(structure_path: str | Path,
     structure_path :
         PDB or CIF file.
     ligand_sel :
-        PyMOL-like selection for the ligand(s).
+        PyMOL-like selection for the ligand(s).  If ``None``, auto-detects
+        primary ligands (non-excipient, ≥7 heavy atoms) sorted largest first.
     protein_sel :
         PyMOL-like selection for the binding partner. Default ``"polymer"``.
     outdir :
@@ -928,13 +1259,33 @@ def visualize(structure_path: str | Path,
 
     Returns
     -------
-    List of dicts with keys ``"report"``, ``"html"``, ``"png"`` per ligand.
+    List of dicts with keys ``"report"``, ``"html"``, ``"png"``, ``"diagram2d"``,
+    ``"type_images"`` per ligand.
     """
     structure_path = Path(structure_path)
     outdir = Path(outdir)
     outdir.mkdir(parents=True, exist_ok=True)
 
     structure = load_structure(structure_path)
+
+    # ── Auto-detect primary ligands when no selection is given ────────────────
+    if ligand_sel is None:
+        candidates = primary_ligands(structure)
+        if not candidates:
+            print("No primary ligands found (all HETATM residues are water, "
+                  "excipients, or < 7 heavy atoms).  Use --analyze to specify "
+                  "a ligand explicitly.")
+            return []
+        # Build a precise selection covering all detected primary ligands
+        parts = [f"(resn {r.get_resname().strip()} and chain {r.get_parent().id} "
+                 f"and resi {r.id[1]})" for r in candidates]
+        ligand_sel = " or ".join(parts)
+        names = ", ".join(
+            f"{r.get_resname().strip()} {r.get_parent().id}:{r.id[1]}"
+            for r in candidates
+        )
+        print(f"Auto-detected primary ligand(s): {names}")
+
     reports = analyze_ligand(structure, ligand_sel, protein_sel=protein_sel,
                              contact_cutoff=contact_cutoff,
                              pdb_path=structure_path)
@@ -945,7 +1296,7 @@ def visualize(structure_path: str | Path,
 
     results = []
     for report in reports:
-        tag = f"{report.ligand_resn}_{report.ligand_chain}{report.ligand_resi}"
+        tag  = f"{report.ligand_resn}_{report.ligand_chain}{report.ligand_resi}"
         stem = f"{prefix}{tag}" if prefix else tag
 
         print(f"\n{report.summary()}")
@@ -953,8 +1304,13 @@ def visualize(structure_path: str | Path,
         html_path = save_html(structure_path, report, outdir / f"{stem}.html",
                               structure=structure, width=width, height=height)
         png_path  = plot_interaction_summary(report, outdir / f"{stem}_fingerprint.png")
+        diag2d    = plot_ligand_2d(structure_path, report,
+                                   outdir / f"{stem}_2d.png", structure=structure)
+        type_imgs = save_type_images(structure_path, report, outdir, stem,
+                                     structure=structure, width=width, height=height)
 
-        results.append({"report": report, "html": html_path, "png": png_path})
+        results.append({"report": report, "html": html_path, "png": png_path,
+                        "diagram2d": diag2d, "type_images": type_imgs})
 
     return results
 
@@ -978,8 +1334,10 @@ PyMOL selection syntax is supported (see analyze_ligands.py for full reference).
     )
 
     parser.add_argument("structure",  help="PDB or mmCIF file")
-    parser.add_argument("--analyze",  required=True, metavar="SELECTION",
-                        help="Ligand selection, e.g. \"resn ATP\" or \"organic\"")
+    parser.add_argument("--analyze",  default=None, metavar="SELECTION",
+                        help="Ligand selection, e.g. \"resn ATP\" or \"organic\". "
+                             "If omitted, auto-detects primary ligands (non-excipient, "
+                             "≥7 heavy atoms) sorted largest first.")
     parser.add_argument("--protein",  default="polymer",
                         help="Binding partner selection (default: polymer)")
     parser.add_argument("--cutoff",   type=float, default=4.5,
@@ -997,7 +1355,7 @@ PyMOL selection syntax is supported (see analyze_ligands.py for full reference).
 
     results = visualize(
         structure_path  = args.structure,
-        ligand_sel      = args.analyze,
+        ligand_sel      = args.analyze,   # None triggers auto-detection
         protein_sel     = args.protein,
         outdir          = args.outdir,
         prefix          = args.prefix,
@@ -1007,7 +1365,9 @@ PyMOL selection syntax is supported (see analyze_ligands.py for full reference).
     )
 
     if results:
-        print(f"\nGenerated {len(results) * 2} files in '{args.outdir}'")
+        n_type = sum(len(r["type_images"]) for r in results)
+        n_files = len(results) * 3 + n_type * 2   # html + fingerprint + 2d + per-type
+        print(f"\nGenerated {n_files} files in '{args.outdir}'")
 
 
 if __name__ == "__main__":

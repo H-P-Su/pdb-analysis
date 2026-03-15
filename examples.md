@@ -194,7 +194,16 @@ python3 analyze_ligands.py Files/6D1Y.pdb --salt-bridges "polymer" "resn FQJ" --
 
 Finds charged group pairs: ARG/LYS/HIS (cation) ↔ ASP/GLU (anion) within 4.0 Å. Works for protein–protein or protein–ligand. 4HHB has ~55 intra-protein salt bridges.
 
-### Full ligand report (all interaction types)
+### Full ligand report — auto-detect (default)
+
+```bash
+python3 analyze_ligands.py Files/1ATP.pdb
+python3 analyze_ligands.py Files/6D1Y.pdb --out fqj_report
+```
+
+When no mode flag is given, `primary_ligands()` is called automatically: water, common crystallographic excipients (SO4, GOL, EDO, buffer molecules, ions, …), and residues with fewer than 7 heavy atoms are excluded, and a full analysis is run on everything that qualifies, largest first.  Prints `Auto-detected primary ligand(s): …` confirming the selection.
+
+### Full ligand report — explicit selection
 
 ```bash
 python3 analyze_ligands.py Files/6D1Y.pdb --analyze "resn FQJ" --out fqj_report
@@ -230,23 +239,56 @@ Selections use PyMOL-compatible syntax:
 
 ## 4. Visualization — `visualize_interactions.py`
 
-Generates two files per ligand: an interactive 3D HTML viewer and a 2D interaction fingerprint PNG.
+Generates five output files per ligand per run:
+- `{LIG}_{chain}{resi}.html` — interactive 3D viewer (all types toggleable)
+- `{LIG}_{chain}{resi}_fingerprint.png` — 2D interaction fingerprint dot-plot
+- `{LIG}_{chain}{resi}_2d.png` — LIGPLOT-style 2D diagram
+- `{LIG}_{chain}{resi}_{type}.html` — type-specific 3D viewer (one per type with data)
+- `{LIG}_{chain}{resi}_{type}_fingerprint.png` — filtered fingerprint (one per type with data)
 
-### Interactive 3D viewer + fingerprint for any ligand
+### Auto-detect primary ligands (default — no `--analyze` needed)
+
+```bash
+python3 visualize_interactions.py Files/1ATP.pdb
+python3 visualize_interactions.py Files/6D1Y.pdb --outdir ./images
+```
+
+When `--analyze` is omitted the script calls `primary_ligands()` internally: it filters out water, common crystallographic excipients (SO4, GOL, EDO, buffer molecules, ions, …), and residues with fewer than 7 heavy atoms, then processes everything that remains, largest first.  A line like `Auto-detected primary ligand(s): ATP E:355, TPO E:197` confirms what was selected.
+
+If the structure contains only excipients/ions and nothing qualifies, a clear message is printed and you are prompted to use `--analyze` explicitly.
+
+### Explicit ligand selection
 
 ```bash
 python3 visualize_interactions.py Files/6D1Y.pdb --analyze "resn FQJ"
 python3 visualize_interactions.py Files/4HHB.pdb --analyze "resn HEM and chain A"
+python3 visualize_interactions.py Files/4HHB.pdb --analyze "organic"
 ```
 
-Saves `FQJ_A801.html` and `FQJ_A801_fingerprint.png` (named by ligand, chain, residue number) in the current directory. Open the HTML in any browser — no server or plugin needed.
+All outputs are named by ligand, chain, and residue number. Open any `.html` file in a browser — no server or plugin needed.
 
 **Color scheme:**
 - Ligand — yellow carbons
-- Contacts — cyan sticks
+- Contacts — cyan sticks; spoked arcs in 2D diagram
 - H-bonds — orange sticks + yellow dashed lines
 - Pi interactions — magenta sticks + magenta dashed lines
 - Salt bridges — blue/red sticks + orange dashed lines
+
+### LIGPLOT-style 2D diagram
+
+The `*_2d.png` file shows:
+- Ligand atoms projected to their best-fit plane via SVD, drawn as a stick diagram with CPK colouring (C=dark gray, N=blue, O=red, S=yellow, P=orange, …)
+- Covalent bonds inferred from 3D distance (<1.9 Å)
+- Protein residues placed evenly around a ring as labelled colour-coded boxes
+- Spoked arcs (LIGPLOT signature) for pure hydrophobic contacts; dashed lines for H-bonds, pi, and salt bridges
+
+### Per-type separate images
+
+For each interaction type that has at least one detection, the script automatically writes:
+- `{stem}_contacts.html` / `_contacts_fingerprint.png` — only contacts pre-checked
+- `{stem}_hbonds.html` / `_hbonds_fingerprint.png` — only H-bonds pre-checked
+- `{stem}_pi.html` / `_pi_fingerprint.png` — only pi interactions pre-checked
+- `{stem}_salt.html` / `_salt_fingerprint.png` — only salt bridges pre-checked
 
 ### Custom output directory and size
 
@@ -255,15 +297,7 @@ python3 visualize_interactions.py Files/6D1Y.pdb --analyze "resn FQJ" \
     --outdir ./images --width 1200 --height 900
 ```
 
-Saves outputs to `images/` and sets the HTML viewer dimensions to 1200×900 px.
-
-### All organic ligands at once
-
-```bash
-python3 visualize_interactions.py Files/4HHB.pdb --analyze "organic"
-```
-
-Runs the full analysis for every non-water HETATM residue in the file, generating one HTML + one PNG per ligand.
+Saves all outputs to `images/` and sets the HTML viewer dimensions to 1200×900 px.
 
 ### Custom partner selection and contact cutoff
 

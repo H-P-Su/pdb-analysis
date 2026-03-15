@@ -93,14 +93,21 @@ BioPython, NumPy
 | Function | Returns | Description |
 |---|---|---|
 | `load_structure(path)` | `Structure` | Load PDB or mmCIF |
+| `get_ligands(structure)` | `list[Residue]` | All non-water HETATM residues |
+| `primary_ligands(structure, min_atoms, exclude_excipients)` | `list[Residue]` | Non-excipient ligands ≥ min_atoms heavy atoms, largest first |
 | `find_contacts(structure, sel1, sel2, cutoff)` | `list[Contact]` | Heavy-atom contacts |
 | `find_hydrogen_bonds(...)` | `list[HBond]` | H-bonds via heavy-atom geometry |
 | `find_pi_interactions(...)` | `list[PiInteraction]` | Pi-stacking + cation-pi |
 | `find_salt_bridges(...)` | `list[SaltBridge]` | Charged group pairs |
 | `analyze_ligand(structure, lig_sel, ...)` | `list[LigandReport]` | All interactions per ligand |
 
+### Constants
+- `WATER_NAMES` — frozenset of water residue names
+- `COMMON_EXCIPIENTS` — frozenset of ~50 common crystallographic additives (SO4, GOL, EDO, buffer molecules, cryoprotectants, ions) used to filter auto-detected ligands
+
 ### CLI
 ```bash
+python3 analyze_ligands.py structure.pdb              # auto-detect primary ligands, full report
 python3 analyze_ligands.py structure.pdb --ligands
 python3 analyze_ligands.py structure.pdb --contacts "resn ATP" "polymer" --cutoff 4.5
 python3 analyze_ligands.py structure.pdb --hbonds "polymer" "resn ATP"
@@ -108,6 +115,8 @@ python3 analyze_ligands.py structure.pdb --pi "polymer" "resn ATP"
 python3 analyze_ligands.py structure.pdb --salt-bridges "polymer" "polymer"
 python3 analyze_ligands.py structure.pdb --analyze "resn ATP" --out report.csv
 ```
+
+When invoked with no mode flag, auto-detects primary ligands via `primary_ligands()` and runs a full analysis on all of them.
 
 ---
 
@@ -117,17 +126,30 @@ python3 analyze_ligands.py structure.pdb --analyze "resn ATP" --out report.csv
 BioPython, NumPy, Matplotlib; py3Dmol only needed for `build_view()` (notebook use)
 HTML output loads **3Dmol.js via CDN** — no py3Dmol required for CLI use.
 
+### Key Functions
+| Function | Description |
+|---|---|
+| `save_html(...)` | Write self-contained 3D HTML viewer; `active_types` controls which toggles start checked |
+| `plot_interaction_summary(report, path, types)` | 2D fingerprint dot-plot; `types` filters to a subset of interaction columns |
+| `plot_ligand_2d(structure_path, report, path)` | LIGPLOT-style 2D diagram (SVD projection, CPK atoms, spoked arcs) |
+| `save_type_images(...)` | Per-type HTML + filtered fingerprint for each interaction type with data |
+| `visualize(...)` | High-level: runs all analysis + writes all output files |
+
 ### Outputs
 | File | Description |
 |---|---|
 | `{LIG}_{chain}{resi}.html` | Self-contained 3D viewer with per-type toggles and residue panel |
 | `{LIG}_{chain}{resi}_fingerprint.png` | 2D dot-plot: residues × interaction types |
+| `{LIG}_{chain}{resi}_2d.png` | LIGPLOT-style 2D diagram (SVD-projected ligand + residue boxes) |
+| `{LIG}_{chain}{resi}_{type}.html` | Per-type 3D viewer (only that interaction type pre-checked) |
+| `{LIG}_{chain}{resi}_{type}_fingerprint.png` | Per-type filtered fingerprint PNG |
 
 ### HTML viewer features
 - Toggle show/hide per interaction type (contacts, H-bonds, pi, salt bridges) — updates both 3D scene and residue panel simultaneously
 - **Show all / Hide all** buttons
 - Side panel lists every partner residue with atom names, distances, and roles
 - Loads 3Dmol.js from CDN; fully self-contained single HTML file
+- Per-type separate HTMLs have only the relevant toggle pre-checked
 
 ### Color scheme
 | Type | Color |
@@ -140,9 +162,12 @@ HTML output loads **3Dmol.js via CDN** — no py3Dmol required for CLI use.
 
 ### CLI
 ```bash
-python3 visualize_interactions.py structure.pdb --analyze "organic"
+python3 visualize_interactions.py structure.pdb                           # auto-detect primary ligands
+python3 visualize_interactions.py structure.pdb --analyze "resn ATP"
 python3 visualize_interactions.py structure.pdb --analyze "resn ATP" --outdir ./images --width 1200
 ```
+
+`--analyze` is optional. When omitted, `primary_ligands()` is called automatically — excipients, ions, and small molecules (<7 heavy atoms) are skipped.
 
 ---
 

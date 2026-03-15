@@ -55,6 +55,25 @@ from Bio.PDB.Structure import Structure
 
 WATER_NAMES: frozenset[str] = frozenset({"HOH", "WAT", "H2O", "DOD", "SOL"})
 
+# Common crystallographic excipients — buffers, cryoprotectants, precipitants,
+# counter-ions, and detergent fragments seen in PDB HETATM records.
+# Used by primary_ligands() to skip junk when no ligand is specified.
+COMMON_EXCIPIENTS: frozenset[str] = frozenset({
+    # Inorganic ions / salts
+    "SO4", "PO4", "HPO", "CL", "NA", "MG", "CA", "ZN", "FE", "MN",
+    "CU", "CO", "NI", "K", "IOD", "BR", "F", "CD", "HG", "AU", "PT",
+    # Common buffer / precipitant molecules
+    "GOL", "EDO", "PEG", "MPD", "DMS", "ACT", "ACY", "EOH", "IPA",
+    "EGL", "PGE", "P6G", "1PE", "2PE", "PE4", "PE5", "PE8", "OLC",
+    "MES", "EPE", "BIS", "TRS", "HED", "FMT", "ACE", "IMD", "AZI",
+    "SCN", "NHE", "NH4", "URE", "GLC", "SUC", "CIT", "TAR", "MLT",
+    "BME", "DTT", "TCE", "TBR", "IOH", "MOH", "POL", "DIO", "PDO",
+    # Detergents / lipids fragments
+    "OLA", "OLB", "PC1", "LMT", "BOG", "DDM", "OG", "PGR",
+    # Misc small molecules added during crystallisation
+    "NO3", "CO3", "HCO", "FLC", "TLA", "PCA", "CPS",
+})
+
 PROTEIN_RESIDUES: frozenset[str] = frozenset({
     "ALA", "ARG", "ASN", "ASP", "CYS", "GLN", "GLU", "GLY",
     "HIS", "ILE", "LEU", "LYS", "MET", "PHE", "PRO", "SER",
@@ -723,6 +742,44 @@ def get_ligands(structure: Structure,
     return out
 
 
+def primary_ligands(structure: Structure,
+                    min_atoms: int = 7,
+                    exclude_excipients: bool = True) -> list[Residue]:
+    """
+    Return biologically relevant HETATM residues, largest first.
+
+    Filters out water, common crystallographic excipients, and residues with
+    fewer than ``min_atoms`` heavy atoms.  Results are sorted by heavy-atom
+    count descending, so index 0 is always the most likely drug/cofactor.
+
+    Parameters
+    ----------
+    structure :
+        BioPython Structure.
+    min_atoms :
+        Minimum number of heavy atoms required (default 7 — excludes most
+        small ions and monoatomic species but keeps e.g. heme, ATP, small
+        fragments).
+    exclude_excipients :
+        Remove residue names in COMMON_EXCIPIENTS (default True).
+
+    Returns
+    -------
+    List of Residue objects sorted by heavy-atom count descending.
+    """
+    candidates: list[tuple[int, Residue]] = []
+    for res in get_ligands(structure, exclude_water=True):
+        resn = res.get_resname().strip()
+        if exclude_excipients and resn in COMMON_EXCIPIENTS:
+            continue
+        n_heavy = sum(1 for a in res if a.element and a.element.strip() != "H")
+        if n_heavy < min_atoms:
+            continue
+        candidates.append((n_heavy, res))
+    candidates.sort(key=lambda x: x[0], reverse=True)
+    return [r for _, r in candidates]
+
+
 def find_contacts(
     structure: Structure,
     sel1: str,
@@ -1231,7 +1288,7 @@ PyMOL selection examples:
     parser.add_argument("structure", help="PDB or mmCIF file")
 
     mode = parser.add_argument_group("analysis mode (pick one)")
-    mx = mode.add_mutually_exclusive_group(required=True)
+    mx = mode.add_mutually_exclusive_group(required=False)
     mx.add_argument("--ligands",      action="store_true",
                     help="List all ligands in the structure")
     mx.add_argument("--contacts",     nargs="+", metavar="SEL",
@@ -1244,7 +1301,9 @@ PyMOL selection examples:
                     dest="salt_bridges",
                     help="Salt bridges: SEL1 [SEL2]")
     mx.add_argument("--analyze",      metavar="SEL",
-                    help="Full analysis for matching ligand(s)")
+                    help="Full analysis for matching ligand(s). If no mode is "
+                         "given, auto-detects primary ligands (non-excipient, "
+                         "≥7 heavy atoms) and runs full analysis.")
 
     params = parser.add_argument_group("parameters")
     params.add_argument("--cutoff",  type=float, default=None,
@@ -1311,9 +1370,29 @@ PyMOL selection examples:
         if args.out:
             to_csv(results, args.out)
 
-    elif args.analyze:
+    elif args.analyze is not None or not any([
+            args.ligands, args.contacts, args.hbonds,
+            args.pi, args.salt_bridges]):
+        # Explicit selection OR no action given → auto-detect primary ligands
+        sel = args.analyze
+        if sel is None:
+            candidates = primary_ligands(structure)
+            if not candidates:
+                print("No primary ligands found (all HETATM residues are water, "
+                      "excipients, or < 7 heavy atoms).  Use --analyze SEL to "
+                      "specify a ligand explicitly.")
+                return
+            parts = [f"(resn {r.get_resname().strip()} and chain {r.get_parent().id} "
+                     f"and resi {r.id[1]})" for r in candidates]
+            sel = " or ".join(parts)
+            names = ", ".join(
+                f"{r.get_resname().strip()} {r.get_parent().id}:{r.id[1]}"
+                for r in candidates
+            )
+            print(f"Auto-detected primary ligand(s): {names}\n")
+
         reports = analyze_ligand(
-            structure, args.analyze,
+            structure, sel,
             protein_sel=args.protein,
             contact_cutoff=args.cutoff or DEFAULT_CONTACT_CUTOFF,
             hbond_cutoff=DEFAULT_HBOND_CUTOFF,
@@ -1321,7 +1400,7 @@ PyMOL selection examples:
             pdb_path=args.structure,
         )
         if not reports:
-            print(f"No residues matched selection: {args.analyze!r}")
+            print(f"No residues matched selection: {sel!r}")
             return
 
         for report in reports:
