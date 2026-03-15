@@ -378,7 +378,81 @@ python3 examples.py
 
 ---
 
-## 7. Molecular Dynamics Pipeline — `run_md.py`
+## 7. Ligand RMSD — `ligand_rmsd.py`
+
+Computes heavy-atom RMSD for a named ligand across multiple PDB structures, after aligning each structure to a reference by backbone Cα superposition.
+
+### Centroid reference (default)
+
+```bash
+python3 ligand_rmsd.py --ligand HEM Files/2HHB.pdb Files/4HHB.pdb
+```
+
+With no `--reference`, all structures are aligned to the first file as an anchor, and the centroid (mean coordinates of the common heavy atoms) is used as the reference. Both structures are reported symmetrically around that centroid:
+
+```
+| File     | RMSD (Å) | Z-score | Atoms matched | Included |
+|----------|----------|---------|---------------|----------|
+| 2HHB.pdb |    0.126 |       0 |            43 | Yes      |
+| 4HHB.pdb |    0.126 |       0 |            43 | Yes      |
+
+Average RMSD: 0.126 Å  (over 2 structures)
+```
+
+### Explicit reference
+
+```bash
+python3 ligand_rmsd.py --ligand HEM --reference Files/4HHB.pdb Files/2HHB.pdb Files/4HHB.pdb
+```
+
+Superimposes each structure onto the reference and measures ligand deviation from it:
+
+```
+| File     | RMSD (Å) | Z-score | Atoms matched | Included |
+|----------|----------|---------|---------------|----------|
+| 2HHB.pdb |    0.251 |      +1 |            43 | Yes      |
+| 4HHB.pdb |    0.000 |      -1 |            43 | Yes      |
+
+Average RMSD: 0.126 Å  (over 2 structures)
+```
+
+The 0.251 Å shift reflects the small but real rearrangement of the heme group between oxy (4HHB) and deoxy (2HHB) haemoglobin.
+
+### Glob pattern
+
+```bash
+python3 ligand_rmsd.py --ligand ATP "structures/*.pdb"
+```
+
+Expands the glob and processes all matching files. Quotes are required to prevent the shell from expanding the pattern before the script sees it.
+
+### Restrict alignment to one chain
+
+```bash
+python3 ligand_rmsd.py --ligand HEM --chain A Files/2HHB.pdb Files/4HHB.pdb
+```
+
+Uses only chain A Cα atoms for backbone superposition and only looks for HEM in chain A. Useful when other chains have a different ligand or when alignment is noisy across chains.
+
+### Custom z-score threshold
+
+```bash
+python3 ligand_rmsd.py --ligand HEM --zscore 1.5 Files/2HHB.pdb Files/4HHB.pdb
+```
+
+Structures with `|z| > 1.5` are flagged as outliers and excluded from the final average. The default threshold is 2.0.
+
+### Report z-scores without excluding anything
+
+```bash
+python3 ligand_rmsd.py --ligand HEM --no-exclude Files/2HHB.pdb Files/4HHB.pdb
+```
+
+Computes and prints z-scores but includes every structure in the average regardless of deviation.
+
+---
+
+## 8. Molecular Dynamics Pipeline — `run_md.py`
 
 > **Requires GROMACS** in PATH. Install first:
 > ```bash
