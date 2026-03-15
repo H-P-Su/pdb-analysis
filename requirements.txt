@@ -1,0 +1,21 @@
+# Core
+biopython==1.86
+numpy==2.4.3
+matplotlib==3.10.8
+scipy==1.17.1
+
+# Ligand RMSD table output
+tabulate==0.10.0
+
+# 3D HTML viewer (visualize_interactions.py)
+py3Dmol
+
+# MD trajectory analysis — DSSP and PCA (run_md.py)
+MDAnalysis==2.10.0
+
+# MD structure preparation — fills missing side-chain atoms (run_md.py)
+# Requires OpenMM as a dependency; easiest via conda:
+#   conda install -c conda-forge pdbfixer openmm
+# Or pip:
+#   pip install pdbfixer openmm
+pdbfixer
