@@ -1,20 +1,23 @@
 # PDB Toolkit — Project Plan
 
 ## Goal
-A suite of standalone Python CLI scripts for downloading, analysing, visualising, and running molecular dynamics on protein structures from RCSB.
+A suite of standalone Python tools for downloading, analysing, visualising, and running molecular dynamics on protein structures from RCSB. Includes a Streamlit web app that wraps the three main analysis libraries.
 
 ## Project Structure
 ```
 PDBs/
-├── PLAN.md                    # This file
-├── MD_TUTORIAL.md             # Science behind the MD pipeline
-├── examples.md                # Runnable CLI examples for every script
+├── PLAN.md                    # This file — technical architecture
+├── README.md                  # User-facing guide with examples
+├── INSTALL.md                 # Setup instructions
+├── examples.md                # Extended CLI examples
 ├── future_features.md         # Feature backlog
+├── MD_TUTORIAL.md             # Science behind the MD pipeline
 ├── requirements.txt           # Python dependencies
+├── app.py                     # Streamlit web app (5 tabs)
 ├── download_pdb.py            # Download PDB/CIF/FASTA from RCSB
-├── summarize_structures.py    # Metadata, B-factor, Ramachandran, FASTA, Rg, batch CSV
+├── summarize_structures.py    # Metadata, B-factor, Ramachandran, FASTA, Rg, BSA
 ├── analyze_ligands.py         # Ligand contacts, H-bonds, pi, salt bridges
-├── visualize_interactions.py  # 3D HTML viewer + 2D fingerprint PNG
+├── visualize_interactions.py  # 3D HTML viewer + 2D LIGPLOT diagrams
 ├── analyze_rmsd.py            # Cα RMSD, superposition, pairwise matrix, NMR ensemble
 ├── ligand_rmsd.py             # Ligand heavy-atom RMSD across multiple structures
 ├── conservation.py            # Per-residue sequence conservation from FASTA
@@ -29,7 +32,36 @@ PDBs/
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
+streamlit run app.py          # web interface
 ```
+
+---
+
+## App: app.py
+
+### Purpose
+Streamlit browser-based interface wrapping `summarize_structures`, `analyze_ligands`, and `visualize_interactions`. No CLI knowledge required.
+
+### Architecture
+- **File persistence**: uploaded PDB saved to `tempfile.mkdtemp()` path stored in `st.session_state`; persists for the browser session
+- **Analysis caching**: `@st.cache_data` keyed on `pdb_bytes: bytes` — identical file never re-analyzed; contact cutoff and BSA probe radius changes trigger re-analysis of their respective functions only
+- **Structure objects**: `@st.cache_resource` keyed on path string for BioPython `Structure` (not picklable by `cache_data`)
+- **Plots**: each plot function saves to a `NamedTemporaryFile`, bytes are read back and temp file deleted; bytes passed to `st.image()` and `st.download_button()`
+- **3D viewer**: `_render_html()` called directly; resulting HTML string passed to `st.components.v1.html(height=720)`
+
+### Tabs
+| Tab | Key functions called |
+|-----|---------------------|
+| 📋 Structure Summary | `summarize_structure`, `bfactor_stats`, `plot_bfactor`, `ramachandran_data`, `plot_ramachandran`, `extract_fasta`, `find_missing_residues`, `get_ligands` |
+| ⬛ Buried Surface Area | `buried_surface_areas`, `plot_bsa_matrix` |
+| 🔬 Ligand Analysis | `primary_ligands`, `analyze_ligand` |
+| 🌐 3D Viewer | `_render_html` (from `visualize_interactions`) |
+| 🖼 2D Diagrams | `plot_interaction_summary`, `plot_ligand_2d` |
+
+### Sidebar controls
+- Contact cutoff (Å): 3.0–7.0, default 4.5 — triggers `_run_ligand_analysis` re-cache
+- BSA probe radius (Å): 1.0–2.0, default 1.4 — triggers `_run_bsa` re-cache
+- BSA sphere points: 50/100/200/500, default 100
 
 ---
 
@@ -55,21 +87,34 @@ python3 download_pdb.py --overwrite 4HHB
 ## Script: summarize_structures.py
 
 ### Dependencies
-BioPython, NumPy, Matplotlib
+BioPython ≥ 1.79, NumPy, Matplotlib
 
 ### Key Functions
-| Function | Description |
-|---|---|
-| `parse_header(path)` | Resolution, R-work/free, method, organism, date |
-| `summarize_structure(path)` | Full summary dict |
-| `batch_summary(paths, out_csv)` | Summarize N structures → CSV |
-| `find_missing_residues(path)` | SEQRES vs ATOM comparison per chain |
-| `extract_fasta(path, chain)` | FASTA from ATOM coordinates |
-| `bfactor_stats(structure, chain)` | Per-residue Cα B-factor with ±2σ flags |
-| `radius_of_gyration(structure, chain)` | Cα Rg in Å |
-| `ramachandran_data(structure, chain)` | phi/psi angles + region classification |
-| `plot_bfactor(data, output)` | B-factor profile PNG |
-| `plot_ramachandran(data, output)` | Ramachandran scatter PNG |
+| Function | Signature | Description |
+|---|---|---|
+| `load_structure` | `(path, sid) → Structure` | Load PDB or mmCIF |
+| `parse_header` | `(path) → dict` | Resolution, R-work/free, method, organism, date |
+| `summarize_structure` | `(path) → dict` | Full summary dict (all header + inventory fields) |
+| `batch_summary` | `(paths, out_csv) → list[dict]` | Summarize N structures → CSV |
+| `find_missing_residues` | `(path) → list[dict]` | SEQRES vs ATOM comparison per chain |
+| `extract_fasta` | `(path, chain) → str` | FASTA from ATOM coordinates |
+| `bfactor_stats` | `(structure, chain) → list[dict]` | Per-residue Cα B-factor with ±2σ flags |
+| `radius_of_gyration` | `(structure, chain, atom_name) → float` | Cα Rg in Å |
+| `ramachandran_data` | `(structure, chain) → list[dict]` | phi/psi angles + helix/sheet/allowed/outlier |
+| `buried_surface_areas` | `(structure, probe_radius, n_points) → list[dict]` | Pairwise chain BSA via Shrake-Rupley; sorted by bsa_total desc |
+| `plot_bfactor` | `(data, output, title) → Path` | B-factor profile PNG |
+| `plot_ramachandran` | `(data, output, title) → Path` | Ramachandran scatter PNG |
+| `plot_bsa_matrix` | `(bsa_results, chain_ids, output, title) → Path` | BSA heatmap + ranked bar chart PNG |
+
+### BSA algorithm
+```
+BSA(A, B) = ( SASA_A + SASA_B − SASA_AB ) / 2
+bsa_on_A  = SASA_A − SASA_A_in_complex
+bsa_on_B  = SASA_B − SASA_B_in_complex
+```
+- Uses `Bio.PDB.SASA.ShrakeRupley(probe_radius, n_points)`
+- Per-chain SASA within the complex obtained by summing per-atom SASA for atoms belonging to each chain after running on the combined sub-structure
+- Helper `_chain_substructure(source, chain_ids)` builds a new Structure from copied chains
 
 ### CLI
 ```bash
@@ -82,6 +127,8 @@ python3 summarize_structures.py 1abc.pdb --ramachandran --plot
 python3 summarize_structures.py 1abc.pdb --rg
 ```
 
+Note: `buried_surface_areas` is importable but not yet exposed as a CLI flag. Use `app.py` or import directly.
+
 ---
 
 ## Script: analyze_ligands.py
@@ -92,22 +139,39 @@ BioPython, NumPy
 ### Key Functions
 | Function | Returns | Description |
 |---|---|---|
-| `load_structure(path)` | `Structure` | Load PDB or mmCIF |
+| `load_structure(path)` | `Structure` | Load PDB or mmCIF; fills missing element fields |
 | `get_ligands(structure)` | `list[Residue]` | All non-water HETATM residues |
-| `primary_ligands(structure, min_atoms, exclude_excipients)` | `list[Residue]` | Non-excipient ligands ≥ min_atoms heavy atoms, largest first |
+| `primary_ligands(structure, min_atoms, exclude_excipients)` | `list[Residue]` | Non-excipient ligands ≥ min_atoms heavy atoms, sorted largest first |
 | `find_contacts(structure, sel1, sel2, cutoff)` | `list[Contact]` | Heavy-atom contacts |
-| `find_hydrogen_bonds(...)` | `list[HBond]` | H-bonds via heavy-atom geometry |
-| `find_pi_interactions(...)` | `list[PiInteraction]` | Pi-stacking + cation-pi |
-| `find_salt_bridges(...)` | `list[SaltBridge]` | Charged group pairs |
-| `analyze_ligand(structure, lig_sel, ...)` | `list[LigandReport]` | All interactions per ligand |
+| `find_hydrogen_bonds(structure, sel1, sel2, ...)` | `list[HBond]` | H-bonds via heavy-atom geometry (N/O/S); angle filter |
+| `find_pi_interactions(structure, sel1, sel2, pdb_path, ...)` | `list[PiInteraction]` | Pi-stacking + cation-pi; ligand rings from CONECT records |
+| `find_salt_bridges(structure, sel1, sel2, cutoff)` | `list[SaltBridge]` | ARG/LYS/HIS ↔ ASP/GLU charged pairs |
+| `analyze_ligand(structure, lig_sel, protein_sel, ...)` | `list[LigandReport]` | All interactions per ligand; runs all four above |
 
 ### Constants
-- `WATER_NAMES` — frozenset of water residue names
-- `COMMON_EXCIPIENTS` — frozenset of ~50 common crystallographic additives (SO4, GOL, EDO, buffer molecules, cryoprotectants, ions) used to filter auto-detected ligands
+- `WATER_NAMES` — frozenset of water residue names (HOH, WAT, H2O, DOD, SOL)
+- `COMMON_EXCIPIENTS` — frozenset of ~50 crystallographic additives filtered by `primary_ligands()`
+- `PROTEIN_RESIDUES`, `NUCLEIC_RESIDUES` — frozensets for polymer classification
+- `PROTEIN_AROMATIC_RINGS` — dict mapping PHE/TYR/TRP/HIS to ring atom name lists
+- `CATION_ATOMS`, `ANION_ATOMS` — dict mapping residue names to charged atom names
+- Default cutoffs: contacts 4.5 Å, H-bonds 3.5 Å, salt bridges 4.0 Å, pi 5.5 Å, cation-pi 6.0 Å
+
+### Data classes
+- `Contact` — chain1, resn1, resi1, atom1, chain2, resn2, resi2, atom2, distance
+- `HBond` — donor_chain/resn/resi/atom, acceptor_chain/resn/resi/atom, distance, angle
+- `PiInteraction` — chain1/resn1/resi1/ring1_label, chain2/resn2/resi2/ring2_label, center_distance, plane_angle, subtype (face_to_face/edge_to_face/intermediate/cation_pi)
+- `SaltBridge` — cation_chain/resn/resi/atom, anion_chain/resn/resi/atom, distance
+- `LigandReport` — aggregates all four for one ligand; properties: n_contacts, n_hbonds, n_pi, n_salt_bridges
+
+### Selection parser
+`SelectionParser(structure)` — PyMOL-compatible subset:
+- Keywords: `all`, `none`, `polymer` (`.protein`/`.nucleic`), `hetatm`, `organic`, `solvent`, `water`, `not`, `and`, `or`, `within N of`
+- Properties: `chain`, `resn`, `resi` (ranges, `+` lists), `name`, `elem`, `b` (comparisons)
+- Digit-prefixed residue names (e.g. `1PE`, `2HB`) handled by token merging
 
 ### CLI
 ```bash
-python3 analyze_ligands.py structure.pdb              # auto-detect primary ligands, full report
+python3 analyze_ligands.py structure.pdb              # auto-detect + full report
 python3 analyze_ligands.py structure.pdb --ligands
 python3 analyze_ligands.py structure.pdb --contacts "resn ATP" "polymer" --cutoff 4.5
 python3 analyze_ligands.py structure.pdb --hbonds "polymer" "resn ATP"
@@ -116,58 +180,44 @@ python3 analyze_ligands.py structure.pdb --salt-bridges "polymer" "polymer"
 python3 analyze_ligands.py structure.pdb --analyze "resn ATP" --out report.csv
 ```
 
-When invoked with no mode flag, auto-detects primary ligands via `primary_ligands()` and runs a full analysis on all of them.
-
 ---
 
 ## Script: visualize_interactions.py
 
 ### Dependencies
-BioPython, NumPy, Matplotlib; py3Dmol only needed for `build_view()` (notebook use)
-HTML output loads **3Dmol.js via CDN** — no py3Dmol required for CLI use.
+BioPython, NumPy, Matplotlib; `py3Dmol` only for `build_view()` (notebook use).
+HTML output loads **3Dmol.js via CDN** — py3Dmol not required for CLI use.
 
 ### Key Functions
 | Function | Description |
 |---|---|
-| `save_html(...)` | Write self-contained 3D HTML viewer; `active_types` controls which toggles start checked |
-| `plot_interaction_summary(report, path, types)` | 2D fingerprint dot-plot; `types` filters to a subset of interaction columns |
-| `plot_ligand_2d(structure_path, report, path)` | LIGPLOT-style 2D diagram (SVD projection, CPK atoms, spoked arcs) |
-| `save_type_images(...)` | Per-type HTML + filtered fingerprint for each interaction type with data |
-| `visualize(...)` | High-level: runs all analysis + writes all output files |
+| `save_html(structure_path, report, output_path, ...)` | Write self-contained 3D HTML viewer |
+| `_render_html(structure_path, report, structure, width, height, active_types)` | Generate HTML string (called by `save_html`; used directly in `app.py`) |
+| `plot_interaction_summary(report, output_path, types)` | 2D fingerprint dot-plot PNG |
+| `plot_ligand_2d(structure_path, report, output_path, structure)` | LIGPLOT-style 2D diagram PNG |
+| `save_type_images(structure_path, report, outdir, stem, ...)` | Per-type HTML + filtered fingerprint for each type with data |
+| `visualize(structure_path, ligand_sel, protein_sel, outdir, ...)` | High-level: analysis + all outputs |
 
-### Outputs
+### Outputs per ligand
 | File | Description |
 |---|---|
 | `{LIG}_{chain}{resi}.html` | Self-contained 3D viewer with per-type toggles and residue panel |
 | `{LIG}_{chain}{resi}_fingerprint.png` | 2D dot-plot: residues × interaction types |
-| `{LIG}_{chain}{resi}_2d.png` | LIGPLOT-style 2D diagram (SVD-projected ligand + residue boxes) |
-| `{LIG}_{chain}{resi}_{type}.html` | Per-type 3D viewer (only that interaction type pre-checked) |
-| `{LIG}_{chain}{resi}_{type}_fingerprint.png` | Per-type filtered fingerprint PNG |
+| `{LIG}_{chain}{resi}_2d.png` | LIGPLOT-style 2D diagram |
+| `{LIG}_{chain}{resi}_{type}.html` | Per-type 3D viewer (only that interaction pre-checked) |
+| `{LIG}_{chain}{resi}_{type}_fingerprint.png` | Per-type filtered fingerprint |
 
-### HTML viewer features
-- Toggle show/hide per interaction type (contacts, H-bonds, pi, salt bridges) — updates both 3D scene and residue panel simultaneously
-- **Show all / Hide all** buttons
-- Side panel lists every partner residue with atom names, distances, and roles
-- Loads 3Dmol.js from CDN; fully self-contained single HTML file
-- Per-type separate HTMLs have only the relevant toggle pre-checked
-
-### Color scheme
-| Type | Color |
-|---|---|
-| Ligand | Yellow |
-| Contacts | Cyan sticks |
-| H-bonds | Orange sticks + yellow dashed lines |
-| Pi interactions | Magenta sticks + magenta dashed lines |
-| Salt bridges (+/−) | Blue/red sticks + orange dashed lines |
+### HTML viewer internals
+- PDB content embedded as a JS string literal; no server needed
+- `updateScene()` JS function called on checkbox change: resets base cartoon, re-applies atom styles in priority order (contacts < pi < salt < hbonds), removes/adds shapes and labels
+- All atom styles, dashed-line cylinder specs, and label specs pre-serialised to JSON by `_render_html()` and injected into the JS `atomStyles`, `shapeSpecs`, `labelSpecs` variables
 
 ### CLI
 ```bash
-python3 visualize_interactions.py structure.pdb                           # auto-detect primary ligands
+python3 visualize_interactions.py structure.pdb                       # auto-detect
 python3 visualize_interactions.py structure.pdb --analyze "resn ATP"
 python3 visualize_interactions.py structure.pdb --analyze "resn ATP" --outdir ./images --width 1200
 ```
-
-`--analyze` is optional. When omitted, `primary_ligands()` is called automatically — excipients, ions, and small molecules (<7 heavy atoms) are skipped.
 
 ---
 
@@ -179,11 +229,11 @@ BioPython, NumPy, Matplotlib
 ### Key Functions
 | Function | Description |
 |---|---|
-| `calculate_rmsd(path1, path2, ...)` | Cα RMSD after optimal superposition |
-| `superpose(path1, path2, ..., output)` | Superpose mobile onto reference, save PDB |
-| `per_residue_rmsd(path1, path2, ...)` | Per-residue Cα distance after superposition |
-| `pairwise_rmsd_matrix(paths, ...)` | All-vs-all RMSD matrix |
-| `nmr_ensemble_rmsd(path, ...)` | Per-model RMSD vs reference for NMR ensembles |
+| `calculate_rmsd(path1, path2, chain, align)` | Cα RMSD after optimal superposition |
+| `superpose(path1, path2, chain, align, output)` | Superpose mobile onto reference, save PDB |
+| `per_residue_rmsd(path1, path2, chain, align, threshold)` | Per-residue Cα distance after superposition |
+| `pairwise_rmsd_matrix(paths, chain, align)` | All-vs-all RMSD matrix |
+| `nmr_ensemble_rmsd(path, chain, ref_model)` | Per-model RMSD vs reference for NMR ensembles |
 
 ### CLI
 ```bash
@@ -233,10 +283,6 @@ python3 ligand_rmsd.py --ligand HEM --no-exclude "structures/*.pdb"
 ### Dependencies
 BioPython, NumPy, Matplotlib
 
-### Description
-Maps sequence conservation onto a PDB structure from a user-supplied multi-FASTA file.
-No BLAST or network access required.
-
 ### Algorithm
 1. Extract reference sequence from ATOM records
 2. Pairwise-align each FASTA sequence to reference with BLOSUM62 global alignment
@@ -267,10 +313,10 @@ load 6D1Y_conservation.pdb;  spectrum b, red_white_blue, minimum=0, maximum=100
 ## Script: run_md.py
 
 ### Requirements
-- **GROMACS ≥ 2019** (external, LGPL) — `brew install gromacs` / `sudo apt install gromacs`
-- **numpy**, **matplotlib** — `pip install numpy matplotlib`
-- **pdbfixer + openmm** (MIT) — strongly recommended; fills missing side-chain atoms
-- **MDAnalysis** (GPL v2) — `pip install MDAnalysis` — enables DSSP and PCA
+- **GROMACS ≥ 2019** — `brew install gromacs` / `sudo apt install gromacs`
+- **numpy**, **matplotlib**
+- **pdbfixer + openmm** — fills missing side-chain atoms (strongly recommended)
+- **MDAnalysis** — enables DSSP timeline and PCA
 
 ### Pipeline stages
 | Stage | What it does |
@@ -282,33 +328,6 @@ load 6D1Y_conservation.pdb;  spectrum b, red_white_blue, minimum=0, maximum=100
 | `run` | Production MD (Parrinello-Rahman barostat); XTC saved every 10 ps |
 | `analyze` | RMSD, RMSF, Rg, energy, H-bonds, DSSP, PCA |
 | `visualize` | matplotlib plots; PyMOL `.pml`; self-contained HTML report |
-
-### Analysis outputs (in `<stem>_md/`)
-| File | Description |
-|---|---|
-| `rmsd.xvg` | Backbone RMSD vs time |
-| `rmsf.xvg` | Per-residue Cα RMSF |
-| `gyrate.xvg` | Radius of gyration vs time |
-| `energy.xvg` | Potential energy + temperature |
-| `hbond.xvg` | Intra-protein H-bond count |
-| `dssp.npz` | DSSP secondary structure array (frames × residues) |
-| `pca.npz` | PCA results: variance, projected coordinates, PC1 eigenvector |
-| `rmsf_bfactor.pdb` | Reference PDB with RMSF in B-factor column |
-| `pc1_bfactor.pdb` | Reference PDB with PC1 eigenvector magnitude in B-factor column |
-| `md_fit.xtc` | Trajectory centred and fitted to backbone |
-| `plots/<stem>_summary.png` | All analysis panels in one figure |
-| `plots/<stem>_rmsd.png` | Backbone RMSD time series |
-| `plots/<stem>_rmsf.png` | Per-residue flexibility bar chart |
-| `plots/<stem>_rg.png` | Radius of gyration time series |
-| `plots/<stem>_energy.png` | Energy + temperature time series |
-| `plots/<stem>_hbonds.png` | H-bond count time series |
-| `plots/<stem>_dssp.png` | Secondary structure content stacked area |
-| `plots/<stem>_pca.png` | PCA scree plot (variance per PC + cumulative) |
-| `plots/<stem>_pca_scatter.png` | PC1 vs PC2 scatter coloured by time + time series |
-| `plots/<stem>_pca_residues.png` | Per-residue PC1 eigenvector contribution |
-| `<stem>_session.pml` | PyMOL session script (loads structure + trajectory) |
-| `<stem>.pse` | PyMOL binary session |
-| `<stem>_report.html` | Self-contained HTML report with embedded plots and statistics |
 
 ### Default simulation parameters
 | Parameter | Value | Flag |
@@ -322,17 +341,17 @@ load 6D1Y_conservation.pdb;  spectrum b, red_white_blue, minimum=0, maximum=100
 | Save interval | 10 ps | `--save-ps` |
 
 ### Known issues / fixes
-- **Missing side chains**: Crystal structures with disordered residues cause `pdb2gmx` to fail ("atom CG not found"). Fix: install pdbfixer — it reconstructs missing atoms before `pdb2gmx` runs.
-- **PyMOL trajectory**: `mset 1 xN` repeats state 1 N times (no movement). Use `mset 1 -N` to play states 1 through N sequentially. The script uses the correct form.
-- **MDAnalysis TPR version**: MDAnalysis 2.x may not support the newest GROMACS TPR format. The pipeline falls back to `md_ref.pdb` (protein-only) as topology when TPR loading fails.
-- **DSSP C-terminal atoms**: GROMACS names the C-terminal oxygens OC1/OC2. The pipeline renames them to O/OXT before running DSSP so backbone atom counts are equal.
+- **Missing side chains**: Use pdbfixer — it reconstructs missing atoms before `pdb2gmx` runs.
+- **PyMOL trajectory**: `mset 1 xN` (wrong) repeats state 1; use `mset 1 -N` to play states 1–N. Script uses the correct form.
+- **MDAnalysis TPR version**: Falls back to `md_ref.pdb` as topology when TPR loading fails.
+- **DSSP C-terminal atoms**: Pipeline renames GROMACS OC1/OC2 to O/OXT before DSSP so backbone atom counts match.
 
 ### CLI
 ```bash
 python3 run_md.py protein.pdb                            # full pipeline, 10 ns
-python3 run_md.py protein.pdb --ns 100                   # 100 ns production
-python3 run_md.py protein.pdb --steps prepare setup      # build inputs only
-python3 run_md.py protein.pdb --steps analyze visualize  # post-process only
+python3 run_md.py protein.pdb --ns 100
+python3 run_md.py protein.pdb --steps prepare setup
+python3 run_md.py protein.pdb --steps analyze visualize
 python3 run_md.py protein.pdb --ff charmm36m-iua --water tip4p
 python3 run_md.py protein.pdb --ncores 8 --gpu
 ```
@@ -354,3 +373,7 @@ python3 run_md.py protein.pdb --ncores 8 --gpu
 | `846c83e` | Add ligand_rmsd examples to examples.md |
 | `4b5c0f5` | Add requirements.txt |
 | `021afe0` | Add interactive toggles and residue panel to HTML viewer |
+| `9ac6b1d` | Add LIGPLOT-style 2D diagram, per-type images, smart ligand auto-detection |
+| `6a090a2` | Update README.md |
+| `c04630f` | Fix element guessing, digit-prefixed resn parsing, CSV pdb_id truncation |
+| *(current)* | Add Streamlit app (app.py), buried surface area (buried_surface_areas, plot_bsa_matrix), update all markdown files |

@@ -63,7 +63,40 @@ Re-downloads even if `4HHB.pdb` already exists.
 
 ---
 
-## 2. Structure Summaries — `summarize_structures.py`
+## 2. Web App — `app.py`
+
+The Streamlit app provides a browser-based point-and-click interface to all analyses.
+
+### Launch the app
+
+```bash
+streamlit run app.py
+# Opens http://localhost:8501 automatically
+```
+
+Upload any `.pdb` file via the sidebar. All analyses run automatically and appear in five tabs.
+
+### Tab overview
+
+| Tab | What you see |
+|-----|-------------|
+| **📋 Structure Summary** | Metadata table, B-factor profile chart, Ramachandran scatter plot, FASTA sequences, missing residue report |
+| **⬛ Buried Surface Area** | Pairwise chain BSA heatmap, ranked interface bar chart, per-chain SASA table |
+| **🔬 Ligand Analysis** | Contacts, H-bonds, pi interactions, salt bridges per ligand — each downloadable as CSV |
+| **🌐 3D Viewer** | Embedded 3Dmol.js viewer; toggle each interaction type; download standalone HTML |
+| **🖼 2D Diagrams** | Interaction fingerprint dot-plot and LIGPLOT-style 2D diagram per ligand |
+
+### Sidebar controls
+
+| Control | Default | Effect |
+|---------|---------|--------|
+| Contact cutoff (Å) | 4.5 | Distance threshold for heavy-atom contact detection |
+| BSA probe radius (Å) | 1.4 | Probe radius for Shrake-Rupley SASA calculation |
+| BSA sphere points | 100 | Sphere-point count (accuracy vs speed trade-off) |
+
+---
+
+## 3. Structure Summaries — `summarize_structures.py`
 
 ### Print a full metadata summary
 
@@ -144,9 +177,47 @@ python3 summarize_structures.py Files/6D1Y.pdb --ramachandran --plot --chain A
 
 Computes φ/ψ backbone dihedral angles for every residue and classifies them as helix, sheet, allowed, or outlier. `--plot` saves a scatter plot PNG with shaded favored regions and annotated outliers. A well-determined crystal structure typically has < 5% outliers.
 
+### Buried surface area
+
+`buried_surface_areas()` is an importable function (not a CLI flag). Call it directly or use it via `app.py`:
+
+```python
+from summarize_structures import load_structure, buried_surface_areas, plot_bsa_matrix
+
+structure = load_structure("Files/4HHB.pdb")
+
+# Compute BSA for every chain pair (Shrake-Rupley, probe radius 1.4 Å)
+results = buried_surface_areas(structure, probe_radius=1.4, n_points=100)
+
+# Results are sorted by bsa_total descending:
+for r in results:
+    print(f"{r['chain_1']}–{r['chain_2']}: {r['bsa_total']:.0f} Å²")
+# A–B: 997 Å²   (α₁β₁ dimer — main interface)
+# C–D: 939 Å²   (α₂β₂ dimer — main interface)
+# A–D: 806 Å²   (α₁β₂ — weaker cross-dimer contact)
+# B–C: 805 Å²   (α₂β₁ — weaker cross-dimer contact)
+# A–C: 322 Å²   (minimal contact)
+# B–D:   0 Å²   (no contact)
+
+# Save heatmap + ranked bar chart
+chain_ids = [ch.id for ch in structure[0]]
+plot_bsa_matrix(results, chain_ids, "4HHB_bsa.png", title="4HHB")
+```
+
+Each result dict contains:
+
+| Field | Description |
+|-------|-------------|
+| `chain_1`, `chain_2` | Chain IDs |
+| `sasa_1`, `sasa_2` | Isolated-chain SASA (Å²) |
+| `sasa_complex` | Combined SASA when both chains present (Å²) |
+| `bsa_total` | Total buried interface area — `(SASA_A + SASA_B − SASA_AB) / 2` |
+| `bsa_on_1`, `bsa_on_2` | Surface buried on each individual chain (Å²) |
+| `interface_pct_1`, `interface_pct_2` | % of each chain's SASA buried at this interface |
+
 ---
 
-## 3. Ligand Analysis — `analyze_ligands.py`
+## 4. Ligand Analysis — `analyze_ligands.py`
 
 All commands accept [PyMOL-style selections](#selection-syntax) for flexible atom group specification.
 
@@ -237,7 +308,7 @@ Selections use PyMOL-compatible syntax:
 
 ---
 
-## 4. Visualization — `visualize_interactions.py`
+## 5. Visualization — `visualize_interactions.py`
 
 Generates five output files per ligand per run:
 - `{LIG}_{chain}{resi}.html` — interactive 3D viewer (all types toggleable)
@@ -310,7 +381,7 @@ Restricts the binding partner to chain A and widens the contact shell to 5 Å.
 
 ---
 
-## 5. RMSD Analysis — `analyze_rmsd.py`
+## 6. RMSD Analysis — `analyze_rmsd.py`
 
 ### RMSD between two structures
 
@@ -368,7 +439,7 @@ python3 analyze_rmsd.py Files/6D1Z.pdb Files/6D20.pdb --align resnum
 
 ---
 
-## 6. Sequence Conservation — `conservation.py`
+## 7. Sequence Conservation — `conservation.py`
 
 Maps per-residue conservation scores onto a PDB structure using a multi-FASTA file of homologous sequences. Uses BLOSUM62 pairwise alignment — no BLAST or network access required.
 
@@ -423,7 +494,7 @@ MKTAYIAKQRQISFVKSHFSRQLEERLGLIEVQAPILSRVGDGTQDNLSGAEKAVQVKVKALPDAQNTSH...
 
 ---
 
-## 7. Running All Examples at Once
+## 8. Running All Examples at Once
 
 The `examples.py` script downloads six demo structures and exercises every feature above, saving all outputs to `demo_output/`:
 
@@ -467,7 +538,7 @@ python3 examples.py
 
 ---
 
-## 8. Ligand RMSD — `ligand_rmsd.py`
+## 9. Ligand RMSD — `ligand_rmsd.py`
 
 Computes heavy-atom RMSD for a named ligand across multiple PDB structures, after aligning each structure to a reference by backbone Cα superposition.
 
@@ -541,7 +612,7 @@ Computes and prints z-scores but includes every structure in the average regardl
 
 ---
 
-## 9. Molecular Dynamics Pipeline — `run_md.py`
+## 10. Molecular Dynamics Pipeline — `run_md.py`
 
 > **Requires GROMACS** in PATH. Install first:
 > ```bash

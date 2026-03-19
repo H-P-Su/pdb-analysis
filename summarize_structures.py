@@ -671,6 +671,192 @@ def plot_ramachandran(data: list[dict], output_path: str | Path,
     return output_path
 
 
+# ─── Buried Surface Area ──────────────────────────────────────────────────────
+
+def _chain_substructure(source: Structure, chain_ids: set[str]) -> Structure:
+    """Return a new Structure containing only the specified chain IDs from model 0."""
+    from Bio.PDB import Structure as _S, Model as _M
+    ns = _S.Structure("sub")
+    m  = _M.Model(0)
+    ns.add(m)
+    for ch in source[0]:
+        if ch.id in chain_ids:
+            m.add(ch.copy())
+    return ns
+
+
+def buried_surface_areas(
+    structure: Structure,
+    probe_radius: float = 1.4,
+    n_points: int = 100,
+) -> list[dict]:
+    """
+    Compute buried surface area (BSA) for every pair of chains.
+
+    BSA(A, B) = ( SASA(A) + SASA(B) − SASA(A+B) ) / 2
+
+    Also reports how much surface is buried on each individual chain, and
+    per-chain interface percentage (BSA_on_X / SASA_X × 100).
+
+    Parameters
+    ----------
+    structure :
+        BioPython Structure (first model used).
+    probe_radius :
+        Rolling sphere radius in Å. Default 1.4 Å (water).
+    n_points :
+        Number of sphere points for Shrake-Rupley. Higher = more accurate.
+        Default 100.
+
+    Returns
+    -------
+    List of dicts (one per chain pair), sorted by bsa_total descending:
+      chain_1, chain_2,
+      sasa_1, sasa_2, sasa_complex,
+      bsa_total, bsa_on_1, bsa_on_2,
+      interface_pct_1, interface_pct_2
+    """
+    from itertools import combinations
+    from Bio.PDB.SASA import ShrakeRupley
+
+    sr = ShrakeRupley(probe_radius=probe_radius, n_points=n_points)
+    chains = [ch.id for ch in structure[0]]
+
+    if len(chains) < 2:
+        return []
+
+    # Pre-compute individual chain SASAs
+    sasa_single: dict[str, float] = {}
+    for cid in chains:
+        sub = _chain_substructure(structure, {cid})
+        sr.compute(sub, level="A")
+        sasa_single[cid] = sum(a.sasa for a in sub.get_atoms())
+
+    results: list[dict] = []
+    for ca, cb in combinations(chains, 2):
+        sub_ab  = _chain_substructure(structure, {ca, cb})
+        sr.compute(sub_ab, level="A")
+
+        sasa_ab = sum(a.sasa for a in sub_ab.get_atoms())
+        sasa_a_in_complex = sum(
+            a.sasa for ch in sub_ab[0] if ch.id == ca for a in ch.get_atoms()
+        )
+        sasa_b_in_complex = sasa_ab - sasa_a_in_complex
+
+        sa, sb    = sasa_single[ca], sasa_single[cb]
+        bsa_total = (sa + sb - sasa_ab) / 2
+        bsa_on_a  = sa - sasa_a_in_complex
+        bsa_on_b  = sb - sasa_b_in_complex
+
+        results.append({
+            "chain_1":         ca,
+            "chain_2":         cb,
+            "sasa_1":          round(sa,        1),
+            "sasa_2":          round(sb,        1),
+            "sasa_complex":    round(sasa_ab,   1),
+            "bsa_total":       round(bsa_total, 1),
+            "bsa_on_1":        round(bsa_on_a,  1),
+            "bsa_on_2":        round(bsa_on_b,  1),
+            "interface_pct_1": round(100 * bsa_on_a / sa if sa > 0 else 0.0, 1),
+            "interface_pct_2": round(100 * bsa_on_b / sb if sb > 0 else 0.0, 1),
+        })
+
+    return sorted(results, key=lambda r: r["bsa_total"], reverse=True)
+
+
+def plot_bsa_matrix(
+    bsa_results: list[dict],
+    chain_ids: list[str],
+    output_path: str | Path,
+    title: str = "",
+) -> Path:
+    """
+    Save a BSA matrix heatmap (chains × chains) and a ranked bar chart.
+
+    Parameters
+    ----------
+    bsa_results :
+        Output of buried_surface_areas().
+    chain_ids :
+        Ordered list of chain IDs for axis labels.
+    output_path :
+        PNG output path.
+    title :
+        Plot title prefix.
+
+    Returns
+    -------
+    Path to the saved image.
+    """
+    import numpy as np
+
+    n = len(chain_ids)
+    idx = {c: i for i, c in enumerate(chain_ids)}
+    matrix = np.zeros((n, n))
+
+    for r in bsa_results:
+        i, j = idx[r["chain_1"]], idx[r["chain_2"]]
+        matrix[i, j] = r["bsa_total"]
+        matrix[j, i] = r["bsa_total"]   # symmetric
+
+    fig, (ax_heat, ax_bar) = plt.subplots(
+        1, 2, figsize=(max(8, n * 1.4 + 4), max(5, n * 1.2)),
+        gridspec_kw={"width_ratios": [n, max(2, n // 2)]},
+    )
+
+    # ── Heatmap ──────────────────────────────────────────────────────────────
+    vmax = matrix.max() if matrix.max() > 0 else 1.0
+    im = ax_heat.imshow(matrix, cmap="YlOrRd", vmin=0, vmax=vmax, aspect="equal")
+    plt.colorbar(im, ax=ax_heat, label="BSA (Å²)", shrink=0.8)
+
+    ax_heat.set_xticks(range(n))
+    ax_heat.set_yticks(range(n))
+    ax_heat.set_xticklabels([f"Chain {c}" for c in chain_ids], fontsize=9)
+    ax_heat.set_yticklabels([f"Chain {c}" for c in chain_ids], fontsize=9)
+
+    for i in range(n):
+        for j in range(n):
+            val = matrix[i, j]
+            if val > 0:
+                txt_color = "white" if val > 0.6 * vmax else "black"
+                ax_heat.text(j, i, f"{val:.0f}", ha="center", va="center",
+                             fontsize=8, color=txt_color, fontweight="bold")
+
+    ax_heat.set_title(
+        (f"{title}  —  " if title else "") + "Buried Surface Area (Å²)",
+        fontsize=11, fontweight="bold",
+    )
+
+    # ── Ranked bar chart ──────────────────────────────────────────────────────
+    ranked = [r for r in bsa_results if r["bsa_total"] > 0]
+    if ranked:
+        labels = [f"{r['chain_1']}–{r['chain_2']}" for r in ranked]
+        values = [r["bsa_total"]                   for r in ranked]
+        colors = plt.cm.YlOrRd(
+            [v / max(values) * 0.85 + 0.1 for v in values]
+        )
+        bars = ax_bar.barh(labels[::-1], values[::-1],
+                           color=colors[::-1], edgecolor="white", linewidth=0.6)
+        ax_bar.bar_label(bars, fmt="%.0f", fontsize=8, padding=3)
+        ax_bar.set_xlabel("BSA (Å²)", fontsize=9)
+        ax_bar.set_title("Interface ranking", fontsize=10, fontweight="bold")
+        ax_bar.set_xlim(0, max(values) * 1.25)
+        ax_bar.spines[["top", "right"]].set_visible(False)
+        ax_bar.tick_params(axis="y", labelsize=9)
+    else:
+        ax_bar.text(0.5, 0.5, "No buried interfaces\ndetected",
+                    ha="center", va="center", transform=ax_bar.transAxes,
+                    fontsize=11, color="#888")
+        ax_bar.set_axis_off()
+
+    plt.tight_layout()
+    output_path = Path(output_path)
+    plt.savefig(output_path, dpi=150, bbox_inches="tight", facecolor="white")
+    plt.close()
+    print(f"  Saved BSA matrix   → {output_path}")
+    return output_path
+
+
 # ─── Batch Summary ────────────────────────────────────────────────────────────
 
 def batch_summary(paths: list[str | Path],
