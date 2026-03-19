@@ -482,14 +482,31 @@ class SelectionParser:
 
     def _parse_str_list(self) -> list[str]:
         vals: list[str] = []
-        tok = self._peek()
-        if tok and tok[0] in (_TT.VALUE, _TT.NUMBER):
-            vals.append(str(self._consume()[1]))
+
+        def _one() -> str | None:
+            tok = self._peek()
+            if tok is None or tok[0] not in (_TT.VALUE, _TT.NUMBER):
+                return None
+            self._consume()
+            if tok[0] == _TT.NUMBER:
+                # Convert float to int string ("2.0" → "2") then check for a
+                # trailing VALUE token — handles digit-prefixed residue names
+                # like "2HB" or "1PE" that the tokenizer splits into two tokens.
+                n = tok[1]
+                part = str(int(n)) if n == int(n) else str(n)
+                if self._peek() and self._peek()[0] == _TT.VALUE:
+                    part += str(self._consume()[1])
+                return part
+            return str(tok[1])
+
+        val = _one()
+        if val is not None:
+            vals.append(val)
             while self._peek() and self._peek()[0] == _TT.PLUS:
                 self._consume()
-                t = self._peek()
-                if t and t[0] in (_TT.VALUE, _TT.NUMBER):
-                    vals.append(str(self._consume()[1]))
+                val = _one()
+                if val is not None:
+                    vals.append(val)
         return vals
 
     def _parse_resi_list(self) -> list[tuple[int, int]]:
@@ -518,6 +535,17 @@ def _in_ranges(n: int, ranges: list[tuple[int, int]]) -> bool:
 
 # ─── Structure Loading ─────────────────────────────────────────────────────────
 
+def _guess_element(atom_name: str) -> str:
+    """Guess element symbol from a PDB atom name when the element column is blank."""
+    name = atom_name.strip().lstrip("0123456789")
+    if not name:
+        return ""
+    two = name[:2].upper()
+    one = name[0].upper()
+    two_char = {"FE", "ZN", "MG", "CA", "MN", "CU", "CO", "NI", "CL", "BR", "SE"}
+    return two if two in two_char else one
+
+
 def load_structure(path: str | Path, structure_id: str = "struct") -> Structure:
     """
     Load a PDB or mmCIF file and return a BioPython Structure object.
@@ -534,7 +562,15 @@ def load_structure(path: str | Path, structure_id: str = "struct") -> Structure:
         parser = MMCIFParser(QUIET=True)
     else:
         parser = PDBParser(QUIET=True)
-    return parser.get_structure(structure_id, str(path))
+    structure = parser.get_structure(structure_id, str(path))
+    # Fill in missing element fields (common for custom/non-standard ligands whose
+    # PDB files lack the element column at positions 77-78).
+    for atom in structure.get_atoms():
+        if not atom.element or not atom.element.strip():
+            guessed = _guess_element(atom.get_name())
+            if guessed:
+                atom.element = guessed
+    return structure
 
 
 # ─── Geometry Utilities ────────────────────────────────────────────────────────

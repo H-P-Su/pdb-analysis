@@ -87,7 +87,7 @@ def parse_header(path: str | Path) -> dict:
     """
     path = Path(path)
     info = {
-        "pdb_id":          path.stem[:4].upper(),
+        "pdb_id":          path.stem.upper(),
         "title":           "",
         "method":          "",
         "resolution":      None,
