@@ -627,7 +627,7 @@ $(document).ready(function() {{
   $(document).on('click','.seq-aa',function() {{
     var resi=parseInt($(this).data('resi'));
     selectedResi=resi;
-    viewer.zoomTo({{resi:resi}},800);
+    viewer.center({{resi:resi}},500);
     var dv=diseaseVars.find(function(v){{ return v.resi===resi; }});
     if(dv) {{ showVariantPanel(dv); }} else {{ $('#variant-panel').hide(); }}
     renderAll();
