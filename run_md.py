@@ -872,7 +872,7 @@ def omm_minimize(cfg: MDConfig) -> None:
 
     import openmm
     import openmm.unit as unit
-    from openmm.app import PDBFile, Simulation, LocalEnergyMinimizer
+    from openmm.app import PDBFile, Simulation
 
     topology, positions = _omm_load_pdb(cfg.omm_topology)
     system = openmm.XmlSerializer.deserialize(cfg.omm_system.read_text())
@@ -886,7 +886,7 @@ def omm_minimize(cfg: MDConfig) -> None:
     e0 = (sim.context.getState(getEnergy=True)
           .getPotentialEnergy().value_in_unit(unit.kilojoules_per_mole))
     log.info("  Initial energy: %.1f kJ/mol", e0)
-    LocalEnergyMinimizer.minimize(sim.context, maxIterations=50000)
+    openmm.LocalEnergyMinimizer.minimize(sim.context, maxIterations=50000)
     e1 = (sim.context.getState(getEnergy=True)
           .getPotentialEnergy().value_in_unit(unit.kilojoules_per_mole))
     log.info("  Final energy:   %.1f kJ/mol", e1)
@@ -899,12 +899,41 @@ def omm_minimize(cfg: MDConfig) -> None:
 
 # ─── OpenMM stage 4: equilibrate ──────────────────────────────────────────────
 
+def _omm_add_restraints(system, topology, positions) -> int:
+    """
+    Add a harmonic position restraint (k=1000 kJ/mol/nm²) on every protein
+    heavy atom.  Returns the number of restrained atoms.
+
+    A fresh CustomExternalForce is created each call so the returned force
+    object is always owned by the passed *system* and can be safely added.
+    """
+    import openmm
+    import openmm.unit as unit
+    restraint = openmm.CustomExternalForce(
+        "0.5*k*((x-x0)^2+(y-y0)^2+(z-z0)^2)")
+    restraint.addGlobalParameter(
+        "k", 1000.0 * unit.kilojoules_per_mole / unit.nanometers**2)
+    restraint.addPerParticleParameter("x0")
+    restraint.addPerParticleParameter("y0")
+    restraint.addPerParticleParameter("z0")
+    n = 0
+    for atom in topology.atoms():
+        if (atom.residue.name not in ("HOH", "WAT", "NA", "CL", "Na+", "Cl-")
+                and atom.element is not None
+                and atom.element.symbol not in ("H", "D")):
+            p = positions[atom.index]
+            restraint.addParticle(atom.index, [p.x, p.y, p.z])
+            n += 1
+    system.addForce(restraint)
+    return n
+
+
 def omm_equilibrate(cfg: MDConfig) -> None:
     """
     OpenMM Stage 4 — Two-phase equilibration with backbone position restraints.
 
     NVT (100 ps default):
-      LangevinMiddleIntegrator at cfg.temp K.  Backbone heavy atoms are
+      LangevinMiddleIntegrator at cfg.temp K.  Protein heavy atoms are
       restrained with a harmonic force (k = 1000 kJ/mol/nm²) so water
       equilibrates around the fixed protein.
 
@@ -912,6 +941,9 @@ def omm_equilibrate(cfg: MDConfig) -> None:
       MonteCarloBarostat added.  Volume relaxes to equilibrium density.
       Restraints remain active.  State saved to nvt.chk / npt.chk for
       resumption in stage 5.
+
+    Each phase deserialises a fresh System from omm_system.xml so that
+    OpenMM's force ownership invariant is respected.
     """
     _omm_check_import()
     log.info("[equil/openmm] NVT + NPT equilibration")
@@ -924,37 +956,20 @@ def omm_equilibrate(cfg: MDConfig) -> None:
 
     topology, _ = _omm_load_pdb(cfg.omm_topology)
     _, positions = _omm_load_pdb(cfg.omm_em_pdb)
-    system = openmm.XmlSerializer.deserialize(cfg.omm_system.read_text())
-
-    # Position restraints on protein backbone heavy atoms
-    restraint = openmm.CustomExternalForce(
-        "0.5*k*((x-x0)^2+(y-y0)^2+(z-z0)^2)")
-    restraint.addGlobalParameter(
-        "k", 1000.0 * unit.kilojoules_per_mole / unit.nanometers**2)
-    restraint.addPerParticleParameter("x0")
-    restraint.addPerParticleParameter("y0")
-    restraint.addPerParticleParameter("z0")
-    n_restrained = 0
-    for atom in topology.atoms():
-        if (atom.residue.name not in ("HOH", "WAT", "NA", "CL", "Na+", "Cl-")
-                and atom.element is not None
-                and atom.element.symbol not in ("H", "D")):
-            p = positions[atom.index]
-            restraint.addParticle(atom.index, [p.x, p.y, p.z])
-            n_restrained += 1
-    system.addForce(restraint)
-    log.info("  Position restraints on %d protein heavy atoms", n_restrained)
 
     # ── NVT ───────────────────────────────────────────────────────────────────
     nvt_chk = cfg.workdir / "nvt.chk"
     if not _skip(cfg.omm_nvt_pdb, "omm-nvt"):
         nvt_steps = cfg.steps_nvt
         log.info("  NVT (%d steps = %d ps) …", nvt_steps, int(cfg.ns_nvt * 1000))
+        system_nvt = openmm.XmlSerializer.deserialize(cfg.omm_system.read_text())
+        n_restrained = _omm_add_restraints(system_nvt, topology, positions)
+        log.info("  Position restraints on %d protein heavy atoms", n_restrained)
         integrator = openmm.LangevinMiddleIntegrator(
             cfg.temp * unit.kelvin, 1.0 / unit.picosecond,
             cfg.dt * unit.picoseconds)
         integrator.setRandomNumberSeed(42)
-        sim = Simulation(topology, system, integrator, _omm_platform(cfg))
+        sim = Simulation(topology, system_nvt, integrator, _omm_platform(cfg))
         sim.context.setPositions(positions)
         sim.context.setVelocitiesToTemperature(cfg.temp * unit.kelvin, 42)
         sim.reporters.append(StateDataReporter(
@@ -973,9 +988,9 @@ def omm_equilibrate(cfg: MDConfig) -> None:
     if not _skip(cfg.omm_npt_pdb, "omm-npt"):
         npt_steps = cfg.steps_npt
         log.info("  NPT (%d steps = %d ps) …", npt_steps, int(cfg.ns_npt * 1000))
-        # Must add barostat before creating the Simulation
+        # Fresh system from XML — each System owns its Force objects
         system_npt = openmm.XmlSerializer.deserialize(cfg.omm_system.read_text())
-        system_npt.addForce(restraint)   # re-add restraint
+        _omm_add_restraints(system_npt, topology, positions)
         system_npt.addForce(openmm.MonteCarloBarostat(
             1.0 * unit.bar, cfg.temp * unit.kelvin, 25))
         integrator = openmm.LangevinMiddleIntegrator(
@@ -1243,10 +1258,11 @@ def omm_analyze(cfg: MDConfig) -> dict:
             from MDAnalysis.analysis.hydrogenbonds import HydrogenBondAnalysis
             hba = HydrogenBondAnalysis(
                 universe=u_fit,
-                donors_sel="protein and name N",
-                acceptors_sel="protein and name O* N*",
-                d_a_cutoff=3.0,
-                d_h_a_angle_cutoff=150.0,
+                donors_sel="protein and (name N* or name O*)",
+                acceptors_sel="protein and (name N* or name O*)",
+                hydrogens_sel="protein and name H*",
+                d_a_cutoff=3.5,
+                d_h_a_angle_cutoff=120.0,
             )
             hba.run()
             # count_by_time() → (n_frames, 2): [time_ps, count]
