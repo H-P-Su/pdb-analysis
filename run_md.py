@@ -79,6 +79,32 @@ DEFAULT_SAVEPS = 10.0     # trajectory save interval in ps
 
 ALL_STEPS = ["prepare", "setup", "minimize", "equil", "run", "analyze", "visualize"]
 
+# ─── OpenMM constants ─────────────────────────────────────────────────────────
+
+OPENMM_FORCEFIELDS = {
+    "amber14-all":   "AMBER14 all-atom / ff14SB (recommended for OpenMM)",
+    "amber99sbildn": "AMBER99SB-ILDN — equivalent to GROMACS amber99sb-ildn",
+    "charmm36":      "CHARMM36m — IDPs, nucleic acids, membrane proteins",
+}
+OPENMM_WATER_MODELS = {
+    "tip3p":   "TIP3P  — standard; compatible with amber14 and amber99sbildn",
+    "tip4pew": "TIP4P-Ew — better bulk water; use with amber14",
+    "spce":    "SPC/E  — use with charmm36",
+}
+# Maps (ff, water) → list of OpenMM ForceField XML file names
+_OMM_FF_XMLS: dict = {
+    ("amber14-all",   "tip3p"):   ["amber14-all.xml", "amber14/tip3p.xml"],
+    ("amber14-all",   "tip4pew"): ["amber14-all.xml", "amber14/tip4pew.xml"],
+    ("amber14-all",   "spce"):    ["amber14-all.xml", "amber14/spce.xml"],
+    ("amber99sbildn", "tip3p"):   ["amber99sbildn.xml", "tip3p.xml"],
+    ("amber99sbildn", "tip4pew"): ["amber99sbildn.xml", "tip4pew.xml"],
+    ("charmm36",      "tip3p"):   ["charmm36.xml", "charmm36/water.xml"],
+    ("charmm36",      "spce"):    ["charmm36.xml", "charmm36/water.xml"],
+}
+DEFAULT_ENGINE    = "gromacs"
+DEFAULT_OMM_FF    = "amber14-all"
+DEFAULT_OMM_WATER = "tip3p"
+
 # ─── MDP file templates ───────────────────────────────────────────────────────
 # These are written to disk before each stage. Format placeholders are filled
 # by _write_mdp() from MDConfig properties.
@@ -303,9 +329,10 @@ class MDConfig:
     ns_nvt:   float = 0.1    # NVT equilibration in ns
     ns_npt:   float = 0.1    # NPT equilibration in ns
     save_ps:  float = DEFAULT_SAVEPS
-    ncores:   int   = 0      # 0 = let GROMACS auto-detect
+    ncores:   int   = 0      # 0 = let GROMACS/OpenMM auto-detect
     gpu:      bool  = False
     steps:    list  = field(default_factory=lambda: list(ALL_STEPS))
+    engine:   str   = DEFAULT_ENGINE
 
     # All output paths derived from workdir
     prepared:  Path = field(init=False)
@@ -350,6 +377,16 @@ class MDConfig:
         self.md_fit    = d / "md_fit.xtc"
         self.plots_dir = d / "plots"
 
+        # OpenMM-specific output paths
+        self.omm_topology:  Path = d / "omm_topology.pdb"   # solvated system topology
+        self.omm_system:    Path = d / "omm_system.xml"      # serialised OpenMM System
+        self.omm_em_pdb:    Path = d / "em.pdb"              # post-minimisation coords
+        self.omm_nvt_pdb:   Path = d / "nvt.pdb"             # post-NVT coords
+        self.omm_npt_pdb:   Path = d / "npt.pdb"             # post-NPT coords
+        self.omm_md_dcd:    Path = d / "md_traj.dcd"         # raw production trajectory
+        self.omm_md_fit:    Path = d / "md_fit.dcd"          # backbone-fitted protein-only DCD
+        self.omm_energy_csv:Path = d / "omm_energy.csv"      # StateDataReporter output
+
     # Derived step counts from ns and dt
     @property
     def steps_nvt(self) -> int:
@@ -370,6 +407,13 @@ class MDConfig:
     @property
     def n_frames(self) -> int:
         return max(1, round(self.ns_prod * 1000 / self.save_ps))
+
+    @property
+    def active_trajectory(self) -> Path:
+        """Fitted trajectory file (engine-agnostic), for PyMOL and analysis."""
+        if self.engine == "openmm":
+            return self.omm_md_fit if self.omm_md_fit.exists() else self.omm_md_dcd
+        return self.md_fit if self.md_fit.exists() else self.md_xtc
 
     @property
     def mdrun_flags(self) -> list:
@@ -699,6 +743,532 @@ def production_run(cfg: MDConfig) -> None:
     if not _skip(cfg.md_xtc, "mdrun-md"):
         log.info("  mdrun (%.1f ns, dt=%.3f ps) …", cfg.ns_prod, cfg.dt)
         gmx("mdrun", "-v", "-deffnm", "md", *cfg.mdrun_flags, cwd=cfg.workdir)
+
+
+# ─── OpenMM helpers ───────────────────────────────────────────────────────────
+
+def _omm_platform(cfg: MDConfig):
+    """Return the fastest available OpenMM Platform given --gpu / --ncores."""
+    import openmm
+    if cfg.gpu:
+        for name in ("CUDA", "OpenCL"):
+            try:
+                return openmm.Platform.getPlatformByName(name)
+            except Exception:
+                pass
+        log.warning("  No GPU platform found — falling back to CPU")
+    plat = openmm.Platform.getPlatformByName("CPU")
+    if cfg.ncores > 0:
+        plat.setPropertyDefaultValue("Threads", str(cfg.ncores))
+    return plat
+
+
+def _omm_check_import() -> None:
+    """Exit with a helpful message if OpenMM is not installed."""
+    try:
+        import openmm  # noqa: F401
+    except ImportError:
+        sys.exit(
+            "\n[error] OpenMM not installed.\n\n"
+            "Install with:\n"
+            "  pip install openmm pdbfixer\n"
+            "Verify:\n"
+            "  python -c 'import openmm; print(openmm.__version__)'\n"
+        )
+
+
+def _omm_load_pdb(path: Path):
+    """Load an OpenMM PDBFile and return (topology, positions)."""
+    from openmm.app import PDBFile
+    pdb = PDBFile(str(path))
+    return pdb.topology, pdb.positions
+
+
+# ─── OpenMM stage 2: setup ────────────────────────────────────────────────────
+
+def omm_setup(cfg: MDConfig) -> None:
+    """
+    OpenMM Stage 2 — Build solvated system.
+
+    Steps:
+      - Load the prepared PDB (from stage 1)
+      - Add missing hydrogens at pH 7.0
+      - Solvate in a cubic box (padding = cfg.box_dist nm each side)
+      - Add Na+/Cl- ions to neutralise and reach cfg.ion_conc mol/L
+      - Save solvated topology as omm_topology.pdb
+      - Serialise the OpenMM System to omm_system.xml for later stages
+    """
+    _omm_check_import()
+    log.info("[setup/openmm] Building solvated OpenMM system")
+    if _skip(cfg.omm_topology, "omm-setup"):
+        return
+
+    import openmm
+    import openmm.unit as unit
+    from openmm.app import PDBFile, ForceField, Modeller, PME, HBonds
+
+    key = (cfg.ff, cfg.water)
+    if key not in _OMM_FF_XMLS:
+        supported = ", ".join(f"{f}/{w}" for f, w in _OMM_FF_XMLS)
+        sys.exit(
+            f"\n[error] Unsupported force field / water model combination for OpenMM: "
+            f"{cfg.ff} / {cfg.water}\n"
+            f"Supported pairs: {supported}\n"
+        )
+    ff_xmls = _OMM_FF_XMLS[key]
+    log.info("  Force field XMLs: %s", ", ".join(ff_xmls))
+
+    forcefield = ForceField(*ff_xmls)
+    pdb        = PDBFile(str(cfg.prepared))
+    modeller   = Modeller(pdb.topology, pdb.positions)
+
+    log.info("  Adding missing hydrogens (pH 7.0) …")
+    modeller.addHydrogens(forcefield, pH=7.0)
+
+    log.info("  Solvating (padding=%.1f nm, [NaCl]=%.2f M, neutralise) …",
+             cfg.box_dist, cfg.ion_conc)
+    modeller.addSolvent(
+        forcefield,
+        model=cfg.water,
+        padding=cfg.box_dist * unit.nanometers,
+        ionicStrength=cfg.ion_conc * unit.molar,
+        neutralize=True,
+    )
+    n_atoms = modeller.topology.getNumAtoms()
+    log.info("  Solvated system: %d atoms", n_atoms)
+
+    # Save solvated topology (reference for MDAnalysis and PyMOL)
+    with open(cfg.omm_topology, "w") as fh:
+        PDBFile.writeFile(modeller.topology, modeller.positions, fh)
+    log.info("  Topology → %s", cfg.omm_topology.name)
+
+    # Build System and serialise it (avoid re-running ForceField.createSystem later)
+    log.info("  Creating system (PME, HBonds constraints, 1 nm cutoff) …")
+    system = forcefield.createSystem(
+        modeller.topology,
+        nonbondedMethod=PME,
+        nonbondedCutoff=1.0 * unit.nanometers,
+        constraints=HBonds,
+    )
+    with open(cfg.omm_system, "w") as fh:
+        fh.write(openmm.XmlSerializer.serialize(system))
+    log.info("  System → %s", cfg.omm_system.name)
+
+
+# ─── OpenMM stage 3: minimize ─────────────────────────────────────────────────
+
+def omm_minimize(cfg: MDConfig) -> None:
+    """
+    OpenMM Stage 3 — Energy minimisation with L-BFGS.
+
+    Runs until convergence (max 50 000 iterations) or until the energy
+    gradient is below the OpenMM default tolerance (10 kJ/mol/nm).
+    Saves minimised coordinates to em.pdb.
+    """
+    _omm_check_import()
+    log.info("[minimize/openmm] Energy minimisation (L-BFGS)")
+    if _skip(cfg.omm_em_pdb, "omm-minimize"):
+        return
+
+    import openmm
+    import openmm.unit as unit
+    from openmm.app import PDBFile, Simulation, LocalEnergyMinimizer
+
+    topology, positions = _omm_load_pdb(cfg.omm_topology)
+    system = openmm.XmlSerializer.deserialize(cfg.omm_system.read_text())
+
+    integrator = openmm.LangevinMiddleIntegrator(
+        cfg.temp * unit.kelvin, 1.0 / unit.picosecond,
+        cfg.dt * unit.picoseconds)
+    sim = Simulation(topology, system, integrator, _omm_platform(cfg))
+    sim.context.setPositions(positions)
+
+    e0 = (sim.context.getState(getEnergy=True)
+          .getPotentialEnergy().value_in_unit(unit.kilojoules_per_mole))
+    log.info("  Initial energy: %.1f kJ/mol", e0)
+    LocalEnergyMinimizer.minimize(sim.context, maxIterations=50000)
+    e1 = (sim.context.getState(getEnergy=True)
+          .getPotentialEnergy().value_in_unit(unit.kilojoules_per_mole))
+    log.info("  Final energy:   %.1f kJ/mol", e1)
+
+    state = sim.context.getState(getPositions=True)
+    with open(cfg.omm_em_pdb, "w") as fh:
+        PDBFile.writeFile(topology, state.getPositions(), fh)
+    log.info("  Minimised structure → %s", cfg.omm_em_pdb.name)
+
+
+# ─── OpenMM stage 4: equilibrate ──────────────────────────────────────────────
+
+def omm_equilibrate(cfg: MDConfig) -> None:
+    """
+    OpenMM Stage 4 — Two-phase equilibration with backbone position restraints.
+
+    NVT (100 ps default):
+      LangevinMiddleIntegrator at cfg.temp K.  Backbone heavy atoms are
+      restrained with a harmonic force (k = 1000 kJ/mol/nm²) so water
+      equilibrates around the fixed protein.
+
+    NPT (100 ps default):
+      MonteCarloBarostat added.  Volume relaxes to equilibrium density.
+      Restraints remain active.  State saved to nvt.chk / npt.chk for
+      resumption in stage 5.
+    """
+    _omm_check_import()
+    log.info("[equil/openmm] NVT + NPT equilibration")
+    if _skip(cfg.omm_npt_pdb, "omm-equil"):
+        return
+
+    import openmm
+    import openmm.unit as unit
+    from openmm.app import PDBFile, Simulation, StateDataReporter
+
+    topology, _ = _omm_load_pdb(cfg.omm_topology)
+    _, positions = _omm_load_pdb(cfg.omm_em_pdb)
+    system = openmm.XmlSerializer.deserialize(cfg.omm_system.read_text())
+
+    # Position restraints on protein backbone heavy atoms
+    restraint = openmm.CustomExternalForce(
+        "0.5*k*((x-x0)^2+(y-y0)^2+(z-z0)^2)")
+    restraint.addGlobalParameter(
+        "k", 1000.0 * unit.kilojoules_per_mole / unit.nanometers**2)
+    restraint.addPerParticleParameter("x0")
+    restraint.addPerParticleParameter("y0")
+    restraint.addPerParticleParameter("z0")
+    n_restrained = 0
+    for atom in topology.atoms():
+        if (atom.residue.name not in ("HOH", "WAT", "NA", "CL", "Na+", "Cl-")
+                and atom.element is not None
+                and atom.element.symbol not in ("H", "D")):
+            p = positions[atom.index]
+            restraint.addParticle(atom.index, [p.x, p.y, p.z])
+            n_restrained += 1
+    system.addForce(restraint)
+    log.info("  Position restraints on %d protein heavy atoms", n_restrained)
+
+    # ── NVT ───────────────────────────────────────────────────────────────────
+    nvt_chk = cfg.workdir / "nvt.chk"
+    if not _skip(cfg.omm_nvt_pdb, "omm-nvt"):
+        nvt_steps = cfg.steps_nvt
+        log.info("  NVT (%d steps = %d ps) …", nvt_steps, int(cfg.ns_nvt * 1000))
+        integrator = openmm.LangevinMiddleIntegrator(
+            cfg.temp * unit.kelvin, 1.0 / unit.picosecond,
+            cfg.dt * unit.picoseconds)
+        integrator.setRandomNumberSeed(42)
+        sim = Simulation(topology, system, integrator, _omm_platform(cfg))
+        sim.context.setPositions(positions)
+        sim.context.setVelocitiesToTemperature(cfg.temp * unit.kelvin, 42)
+        sim.reporters.append(StateDataReporter(
+            str(cfg.workdir / "nvt_log.csv"), max(500, nvt_steps // 100),
+            step=True, time=True, temperature=True, potentialEnergy=True))
+        sim.step(nvt_steps)
+        state = sim.context.getState(getPositions=True, enforcePeriodicBox=True)
+        with open(cfg.omm_nvt_pdb, "w") as fh:
+            PDBFile.writeFile(topology, state.getPositions(), fh)
+        with open(nvt_chk, "wb") as fh:
+            fh.write(sim.context.createCheckpoint())
+        log.info("  NVT done → %s", cfg.omm_nvt_pdb.name)
+
+    # ── NPT ───────────────────────────────────────────────────────────────────
+    npt_chk = cfg.workdir / "npt.chk"
+    if not _skip(cfg.omm_npt_pdb, "omm-npt"):
+        npt_steps = cfg.steps_npt
+        log.info("  NPT (%d steps = %d ps) …", npt_steps, int(cfg.ns_npt * 1000))
+        # Must add barostat before creating the Simulation
+        system_npt = openmm.XmlSerializer.deserialize(cfg.omm_system.read_text())
+        system_npt.addForce(restraint)   # re-add restraint
+        system_npt.addForce(openmm.MonteCarloBarostat(
+            1.0 * unit.bar, cfg.temp * unit.kelvin, 25))
+        integrator = openmm.LangevinMiddleIntegrator(
+            cfg.temp * unit.kelvin, 1.0 / unit.picosecond,
+            cfg.dt * unit.picoseconds)
+        integrator.setRandomNumberSeed(43)
+        sim = Simulation(topology, system_npt, integrator, _omm_platform(cfg))
+        with open(nvt_chk, "rb") as fh:
+            sim.context.loadCheckpoint(fh.read())
+        sim.reporters.append(StateDataReporter(
+            str(cfg.workdir / "npt_log.csv"), max(500, npt_steps // 100),
+            step=True, time=True, temperature=True, potentialEnergy=True,
+            volume=True, density=True))
+        sim.step(npt_steps)
+        state = sim.context.getState(getPositions=True, enforcePeriodicBox=True)
+        with open(cfg.omm_npt_pdb, "w") as fh:
+            PDBFile.writeFile(topology, state.getPositions(), fh)
+        with open(npt_chk, "wb") as fh:
+            fh.write(sim.context.createCheckpoint())
+        log.info("  NPT done → %s", cfg.omm_npt_pdb.name)
+
+
+# ─── OpenMM stage 5: production run ───────────────────────────────────────────
+
+def omm_production(cfg: MDConfig) -> None:
+    """
+    OpenMM Stage 5 — Production MD.
+
+    No position restraints. MonteCarloBarostat for NPT ensemble.
+    Saves a DCD trajectory (md_traj.dcd) and energy CSV (omm_energy.csv).
+    Checkpoints every ~1 ns so the run can be extended later.
+    """
+    _omm_check_import()
+    log.info("[run/openmm] Production MD (%.1f ns, %d steps)",
+             cfg.ns_prod, cfg.steps_prod)
+    if _skip(cfg.omm_md_dcd, "omm-production"):
+        return
+
+    import openmm
+    import openmm.unit as unit
+    from openmm.app import (PDBFile, Simulation, DCDReporter,
+                            StateDataReporter, CheckpointReporter)
+
+    topology, _ = _omm_load_pdb(cfg.omm_topology)
+    # Fresh system (no restraints) + barostat for NPT production
+    system = openmm.XmlSerializer.deserialize(cfg.omm_system.read_text())
+    system.addForce(openmm.MonteCarloBarostat(
+        1.0 * unit.bar, cfg.temp * unit.kelvin, 25))
+
+    integrator = openmm.LangevinMiddleIntegrator(
+        cfg.temp * unit.kelvin, 1.0 / unit.picosecond,
+        cfg.dt * unit.picoseconds)
+    integrator.setRandomNumberSeed(44)
+    sim = Simulation(topology, system, integrator, _omm_platform(cfg))
+
+    with open(cfg.workdir / "npt.chk", "rb") as fh:
+        sim.context.loadCheckpoint(fh.read())
+
+    sim.reporters.append(DCDReporter(str(cfg.omm_md_dcd), cfg.save_steps))
+    sim.reporters.append(StateDataReporter(
+        str(cfg.omm_energy_csv), cfg.save_steps,
+        step=True, time=True, temperature=True,
+        potentialEnergy=True, kineticEnergy=True,
+        totalEnergy=True, volume=True, density=True,
+        progress=True, totalSteps=cfg.steps_prod,
+        remainingTime=True, speed=True))
+    # Checkpoint every ~1 ns
+    ckpt_interval = max(cfg.save_steps, round(1000 / cfg.dt))
+    sim.reporters.append(CheckpointReporter(
+        str(cfg.workdir / "md_running.chk"), ckpt_interval))
+
+    log.info("  Running %.1f ns (dt=%.3f ps, save every %.0f ps) …",
+             cfg.ns_prod, cfg.dt, cfg.save_ps)
+    sim.step(cfg.steps_prod)
+
+    state = sim.context.getState(getPositions=True, enforcePeriodicBox=True)
+    with open(cfg.workdir / "md_final.pdb", "w") as fh:
+        PDBFile.writeFile(topology, state.getPositions(), fh)
+    log.info("  DCD → %s  |  Energy → %s",
+             cfg.omm_md_dcd.name, cfg.omm_energy_csv.name)
+
+
+# ─── OpenMM stage 6: analysis ─────────────────────────────────────────────────
+
+def _omm_write_ref_and_fit(cfg: MDConfig, u, protein, ref_pdb: Path) -> None:
+    """
+    Write the frame-0 reference PDB (protein only) and a backbone-fitted
+    protein-only DCD.  Both files use only protein atoms so MDAnalysis can
+    load them together without an atom-count mismatch.
+    """
+    fit_dcd = cfg.omm_md_fit
+    if ref_pdb.exists() and fit_dcd.exists():
+        return
+
+    import MDAnalysis as mda
+    from MDAnalysis.analysis.align import alignto
+
+    # Write frame-0 reference
+    u.trajectory[0]
+    if not ref_pdb.exists():
+        with mda.Writer(str(ref_pdb)) as w:
+            w.write(protein)
+        log.info("  Reference PDB → %s", ref_pdb.name)
+
+    # Write backbone-fitted protein-only DCD
+    if not fit_dcd.exists():
+        ref_u = mda.Universe(str(ref_pdb))
+        n_frames = len(u.trajectory)
+        log.info("  Fitting %d frames (backbone alignment) …", n_frames)
+        with mda.Writer(str(fit_dcd), n_atoms=len(protein)) as writer:
+            for _ts in u.trajectory:
+                try:
+                    alignto(u, ref_u, select="protein and backbone",
+                            weights="mass")
+                except Exception:
+                    pass   # write unaligned frame if alignment fails
+                writer.write(protein)
+        log.info("  Fitted DCD → %s (%d protein atoms)", fit_dcd.name, len(protein))
+
+
+def _parse_omm_energy_csv(csv_path: Path) -> Optional[np.ndarray]:
+    """Parse the OpenMM StateDataReporter CSV into (n, 3): time_ps, epot, temp."""
+    import csv as _csv
+    rows = []
+    try:
+        with open(csv_path) as fh:
+            reader = _csv.DictReader(fh)
+            for row in reader:
+                try:
+                    t   = float(row.get("Time (ps)", 0) or 0)
+                    ep  = float(row.get("Potential Energy (kJ/mole)", 0) or 0)
+                    tem = float(row.get("Temperature (K)", 0) or 0)
+                    rows.append([t, ep, tem])
+                except (ValueError, TypeError):
+                    continue
+    except Exception as exc:
+        log.warning("  Could not parse energy CSV: %s", exc)
+        return None
+    return np.array(rows) if rows else None
+
+
+def omm_analyze(cfg: MDConfig) -> dict:
+    """
+    OpenMM Stage 6 — Trajectory analysis via MDAnalysis.
+
+    Returns the same ``results`` dict shape as ``run_analysis()`` so that
+    ``plot_results()``, ``write_pymol_script()``, and
+    ``generate_html_report()`` all work unchanged.
+
+    Unit convention (matches GROMACS XVG output that plot_results expects):
+      rmsd[:, 0]  — time in ns          rmsd[:, 1]  — RMSD in nm
+      rmsf[:, 0]  — residue number      rmsf[:, 1]  — RMSF in nm
+      rg[:, 0]    — time in ps          rg[:, 1]    — Rg in nm
+      energy[:, 0]— time in ps          energy[:, 1] — kJ/mol, energy[:, 2] — K
+      hbonds[:, 0]— time in ns          hbonds[:, 1] — count
+    """
+    log.info("[analyze/openmm] Running MDAnalysis trajectory analyses")
+
+    if not cfg.omm_md_dcd.exists():
+        log.warning("  md_traj.dcd not found — skipping analysis")
+        return {}
+
+    try:
+        import MDAnalysis as mda
+        from MDAnalysis.analysis import rms as mda_rms
+    except ImportError:
+        log.warning("  MDAnalysis not installed — skipping (pip install MDAnalysis)")
+        return {}
+
+    try:
+        u = mda.Universe(str(cfg.omm_topology), str(cfg.omm_md_dcd))
+    except Exception as exc:
+        log.warning("  Could not load trajectory: %s", exc)
+        return {}
+
+    protein  = u.select_atoms("protein")
+    n_frames = len(u.trajectory)
+    log.info("  Trajectory: %d frames, %d protein atoms", n_frames, len(protein))
+
+    # Write reference PDB + fitted protein-only DCD (used by DSSP/PCA too)
+    ref_pdb = cfg.workdir / "md_ref.pdb"
+    _omm_write_ref_and_fit(cfg, u, protein, ref_pdb)
+
+    # Re-load using fitted protein-only DCD for all analyses
+    try:
+        u_fit = mda.Universe(str(ref_pdb), str(cfg.omm_md_fit))
+        prot  = u_fit.select_atoms("all")   # all atoms are protein in this universe
+    except Exception as exc:
+        log.warning("  Could not load fitted trajectory: %s — using raw", exc)
+        u_fit = u
+        prot  = protein
+
+    results = {}
+
+    # ── RMSD ──────────────────────────────────────────────────────────────────
+    rmsd_npy = cfg.workdir / "omm_rmsd.npy"
+    if not _skip(rmsd_npy, "omm-rmsd"):
+        try:
+            log.info("  RMSD …")
+            R = mda_rms.RMSD(prot, select="backbone")
+            R.run()
+            # R.results.rmsd: (n_frames, 3) → [frame, time_ps, rmsd_Å]
+            raw = R.results.rmsd
+            arr = np.column_stack([raw[:, 1] / 1000.0,   # ps → ns
+                                   raw[:, 2] / 10.0])    # Å → nm
+            np.save(rmsd_npy, arr)
+        except Exception as exc:
+            log.warning("  RMSD failed: %s", exc)
+            arr = np.empty((0, 2))
+    else:
+        arr = np.load(rmsd_npy)
+    if len(arr):
+        results["rmsd"] = arr
+        log.info("  RMSD: %.3f ± %.3f Å", arr[:, 1].mean() * 10, arr[:, 1].std() * 10)
+
+    # ── RMSF ──────────────────────────────────────────────────────────────────
+    rmsf_npy = cfg.workdir / "omm_rmsf.npy"
+    if not _skip(rmsf_npy, "omm-rmsf"):
+        try:
+            log.info("  RMSF …")
+            ca = prot.select_atoms("name CA")
+            rmsf_calc = mda_rms.RMSF(ca).run()
+            arr_rmsf = np.column_stack([ca.resids,
+                                        rmsf_calc.results.rmsf / 10.0])  # Å → nm
+            np.save(rmsf_npy, arr_rmsf)
+        except Exception as exc:
+            log.warning("  RMSF failed: %s", exc)
+            arr_rmsf = np.empty((0, 2))
+    else:
+        arr_rmsf = np.load(rmsf_npy)
+    if len(arr_rmsf):
+        results["rmsf"] = arr_rmsf
+
+    # ── Radius of gyration ────────────────────────────────────────────────────
+    rg_npy = cfg.workdir / "omm_rg.npy"
+    if not _skip(rg_npy, "omm-rg"):
+        try:
+            log.info("  Radius of gyration …")
+            times_ps, rg_nm = [], []
+            for ts in u_fit.trajectory:
+                times_ps.append(ts.time)
+                rg_nm.append(prot.radius_of_gyration() / 10.0)  # Å → nm
+            arr_rg = np.column_stack([times_ps, rg_nm])
+            np.save(rg_npy, arr_rg)
+        except Exception as exc:
+            log.warning("  Rg failed: %s", exc)
+            arr_rg = np.empty((0, 2))
+    else:
+        arr_rg = np.load(rg_npy)
+    if len(arr_rg):
+        results["rg"] = arr_rg
+
+    # ── Energy from OpenMM CSV reporter ───────────────────────────────────────
+    if cfg.omm_energy_csv.exists():
+        log.info("  Parsing energy CSV …")
+        energy_arr = _parse_omm_energy_csv(cfg.omm_energy_csv)
+        if energy_arr is not None and len(energy_arr):
+            results["energy"] = energy_arr
+
+    # ── H-bonds ───────────────────────────────────────────────────────────────
+    hbond_npy = cfg.workdir / "omm_hbonds.npy"
+    if not _skip(hbond_npy, "omm-hbonds"):
+        try:
+            log.info("  H-bonds …")
+            from MDAnalysis.analysis.hydrogenbonds import HydrogenBondAnalysis
+            hba = HydrogenBondAnalysis(
+                universe=u_fit,
+                donors_sel="protein and name N",
+                acceptors_sel="protein and name O* N*",
+                d_a_cutoff=3.0,
+                d_h_a_angle_cutoff=150.0,
+            )
+            hba.run()
+            # count_by_time() → (n_frames, 2): [time_ps, count]
+            counts = hba.count_by_time()
+            arr_hb = np.column_stack([counts[:, 0] / 1000.0,  # ps → ns
+                                      counts[:, 1]])
+            np.save(hbond_npy, arr_hb)
+        except Exception as exc:
+            log.warning("  H-bond analysis failed (%s) — skipping", exc)
+            arr_hb = np.empty((0, 2))
+    else:
+        arr_hb = np.load(hbond_npy)
+    if len(arr_hb):
+        results["hbonds"] = arr_hb
+
+    # ── DSSP and PCA — reuse existing shared functions ─────────────────────────
+    # md_ref.pdb (protein-only) + omm_md_fit (protein-only DCD) → atom counts match
+    traj_for_mda = cfg.omm_md_fit if cfg.omm_md_fit.exists() else cfg.omm_md_dcd
+    results["dssp"] = _compute_dssp(cfg, traj_for_mda)
+    results["pca"]  = _compute_pca(cfg, traj_for_mda)
+
+    return results
 
 
 # ─── stage 6: trajectory processing + analysis ────────────────────────────────
@@ -1261,7 +1831,7 @@ def write_pymol_script(cfg: MDConfig, results: dict) -> None:
     pca_pdb  = _write_pc1_pdb(cfg, results)
 
     stem     = cfg.pdb_in.stem
-    traj_rel = (cfg.md_fit if cfg.md_fit.exists() else cfg.md_xtc).name
+    traj_rel = cfg.active_trajectory.name
     pml_path = cfg.workdir / f"{stem}_session.pml"
 
     lines = [
@@ -1628,7 +2198,7 @@ def generate_html_report(cfg: MDConfig, results: dict) -> Path:
   {pymol_block}
 
 </main>
-<footer>Generated with run_md.py using GROMACS &amp; MDAnalysis</footer>
+<footer>Generated with run_md.py using {cfg.engine.upper()} &amp; MDAnalysis</footer>
 </body>
 </html>
 """
@@ -1644,23 +2214,35 @@ def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="run_md.py",
         description=textwrap.dedent("""\
-            GROMACS MD pipeline — prepare → simulate → analyse → visualise.
+            MD pipeline (GROMACS or OpenMM) — prepare → simulate → analyse → visualise.
 
             All stages run by default. Use --steps to run a subset:
               --steps prepare setup          build inputs only
               --steps minimize equil run     simulation only (inputs already built)
               --steps analyze visualize      post-process an existing run
+
+            Engine selection:
+              --engine gromacs   (default) requires GROMACS binary in PATH
+              --engine openmm    requires: pip install openmm pdbfixer MDAnalysis
         """),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=textwrap.dedent(f"""\
-            Supported force fields:
+            GROMACS force fields:
             {chr(10).join(f'  {k:20s}  {v}' for k, v in SUPPORTED_FORCEFIELDS.items())}
 
-            Supported water models:
+            OpenMM force fields:
+            {chr(10).join(f'  {k:20s}  {v}' for k, v in OPENMM_FORCEFIELDS.items())}
+
+            GROMACS water models:
             {chr(10).join(f'  {k:8s}  {v}' for k, v in WATER_MODELS.items())}
+
+            OpenMM water models:
+            {chr(10).join(f'  {k:8s}  {v}' for k, v in OPENMM_WATER_MODELS.items())}
         """),
     )
     p.add_argument("pdb", type=Path, help="Input PDB file")
+    p.add_argument("--engine", choices=["gromacs", "openmm"], default=DEFAULT_ENGINE,
+                   help="MD engine to use (default: gromacs)")
 
     p.add_argument("--steps", nargs="+", choices=ALL_STEPS, default=ALL_STEPS,
                    metavar="STEP",
@@ -1668,11 +2250,17 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--workdir", type=Path, default=None,
                    help="Output directory (default: <pdb_stem>_md/)")
 
+    _all_ff    = list(SUPPORTED_FORCEFIELDS) + list(OPENMM_FORCEFIELDS)
+    _all_water = list(WATER_MODELS) + list(OPENMM_WATER_MODELS)
     sim = p.add_argument_group("simulation parameters")
-    sim.add_argument("--ff",    default=DEFAULT_FF,    choices=list(SUPPORTED_FORCEFIELDS),
-                     help=f"Force field (default: {DEFAULT_FF})")
-    sim.add_argument("--water", default=DEFAULT_WATER, choices=list(WATER_MODELS),
-                     help=f"Water model (default: {DEFAULT_WATER})")
+    sim.add_argument("--ff",    default=None,
+                     help=(f"Force field. GROMACS default: {DEFAULT_FF}. "
+                           f"OpenMM default: {DEFAULT_OMM_FF}. "
+                           f"See epilog for all choices."))
+    sim.add_argument("--water", default=None,
+                     help=(f"Water model. GROMACS default: {DEFAULT_WATER}. "
+                           f"OpenMM default: {DEFAULT_OMM_WATER}. "
+                           f"See epilog for all choices."))
     sim.add_argument("--ns",    type=float, default=DEFAULT_NS,
                      help=f"Production MD length in nanoseconds (default: {DEFAULT_NS})")
     sim.add_argument("--temp",  type=float, default=DEFAULT_TEMP,
@@ -1709,8 +2297,34 @@ def main():
         format="%(message)s",
     )
 
-    GMX = _find_gmx()
-    log.info("GROMACS: %s", shutil.which(GMX))
+    engine = args.engine
+
+    # Resolve per-engine defaults for --ff and --water
+    if args.ff is None:
+        args.ff = DEFAULT_FF if engine == "gromacs" else DEFAULT_OMM_FF
+    if args.water is None:
+        args.water = DEFAULT_WATER if engine == "gromacs" else DEFAULT_OMM_WATER
+
+    # Validate force field / water model choices for the chosen engine
+    if engine == "gromacs":
+        if args.ff not in SUPPORTED_FORCEFIELDS:
+            sys.exit(f"[error] Unknown GROMACS force field: {args.ff}\n"
+                     f"Choices: {', '.join(SUPPORTED_FORCEFIELDS)}")
+        if args.water not in WATER_MODELS:
+            sys.exit(f"[error] Unknown GROMACS water model: {args.water}\n"
+                     f"Choices: {', '.join(WATER_MODELS)}")
+        GMX = _find_gmx()
+        log.info("GROMACS: %s", shutil.which(GMX))
+    else:
+        _omm_check_import()
+        import openmm
+        log.info("OpenMM:  %s", openmm.__version__)
+        if args.ff not in OPENMM_FORCEFIELDS:
+            sys.exit(f"[error] Unknown OpenMM force field: {args.ff}\n"
+                     f"Choices: {', '.join(OPENMM_FORCEFIELDS)}")
+        if args.water not in OPENMM_WATER_MODELS:
+            sys.exit(f"[error] Unknown OpenMM water model: {args.water}\n"
+                     f"Choices: {', '.join(OPENMM_WATER_MODELS)}")
 
     pdb_in = args.pdb.resolve()
     if not pdb_in.exists():
@@ -1734,10 +2348,12 @@ def main():
         ncores   = args.ncores,
         gpu      = args.gpu,
         steps    = args.steps,
+        engine   = engine,
     )
 
     log.info("═" * 62)
     log.info("  MD Pipeline  —  %s", pdb_in.name)
+    log.info("  Engine:       %s", engine.upper())
     log.info("  Working dir:  %s", workdir)
     log.info("  Force field:  %s   Water: %s", cfg.ff, cfg.water)
     log.info("  Production:   %.0f ns at %.0f K  (dt = %.3f ps)",
@@ -1746,16 +2362,27 @@ def main():
     log.info("═" * 62)
 
     try:
-        if "prepare"  in cfg.steps: prepare_structure(cfg)
-        if "setup"    in cfg.steps: setup_topology(cfg)
-        if "minimize" in cfg.steps: energy_minimize(cfg)
-        if "equil"    in cfg.steps: equilibrate(cfg)
-        if "run"      in cfg.steps: production_run(cfg)
+        if "prepare" in cfg.steps:
+            prepare_structure(cfg)
+
+        if engine == "gromacs":
+            if "setup"    in cfg.steps: setup_topology(cfg)
+            if "minimize" in cfg.steps: energy_minimize(cfg)
+            if "equil"    in cfg.steps: equilibrate(cfg)
+            if "run"      in cfg.steps: production_run(cfg)
+        else:  # openmm
+            if "setup"    in cfg.steps: omm_setup(cfg)
+            if "minimize" in cfg.steps: omm_minimize(cfg)
+            if "equil"    in cfg.steps: omm_equilibrate(cfg)
+            if "run"      in cfg.steps: omm_production(cfg)
 
         results = {}
         if "analyze" in cfg.steps or "visualize" in cfg.steps:
-            process_trajectory(cfg)
-            results = run_analysis(cfg)
+            if engine == "gromacs":
+                process_trajectory(cfg)
+                results = run_analysis(cfg)
+            else:
+                results = omm_analyze(cfg)
 
         if "visualize" in cfg.steps:
             plot_results(cfg, results)
