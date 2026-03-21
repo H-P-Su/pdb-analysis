@@ -565,7 +565,7 @@ def _render_antibody_html(pdb_bytes: bytes, ab_data: dict,
 
     pdb_escaped = pdb_str.replace("\\", "\\\\").replace("`", "\\`")
 
-    viewer_h = height - 180   # leave room for controls + sequence
+    viewer_h = height - 120   # sequence panel ~110px + margin
 
     return f"""<!DOCTYPE html>
 <html><head>
@@ -574,33 +574,17 @@ def _render_antibody_html(pdb_bytes: bytes, ab_data: dict,
 <style>
 * {{ box-sizing: border-box; }}
 body {{ margin:0; background:#1a1a2e; color:#e8e8f0; font-family:sans-serif; font-size:12px; }}
-#ab-wrap {{ display:flex; flex-direction:column; width:{width}px; }}
 
-/* ── Controls ── */
-.ab-ctrl-header {{
-  display:flex; justify-content:space-between; align-items:center;
-  background:#252540; padding:5px 10px; cursor:pointer;
-  border-radius:4px; user-select:none;
-}}
-.ab-ctrl-header:hover {{ background:#2e2e55; }}
-#ab-ctrl-body {{
-  background:#1e1e38; padding:8px 12px;
-  display:flex; flex-wrap:wrap; gap:12px; align-items:flex-start;
-}}
-.ab-ctrl-section {{ display:flex; flex-direction:column; gap:4px; min-width:120px; }}
-.ab-ctrl-section b {{ font-size:11px; color:#aaa; text-transform:uppercase; letter-spacing:.05em; }}
-.ab-ctrl-row {{ display:flex; flex-wrap:wrap; gap:6px; align-items:center; }}
-label.ab-chk {{ display:flex; align-items:center; gap:4px; cursor:pointer; font-size:12px; }}
-label.ab-chk input {{ cursor:pointer; }}
-.ab-dim {{ opacity:0.45; }}
+/* ── Outer wrapper: row layout ── */
+#ab-wrap {{ display:flex; flex-direction:row; width:{width}px; height:{height}px; overflow:hidden; }}
+
+/* ── Left column: sequence + viewer ── */
+#ab-left {{ flex:1; display:flex; flex-direction:column; min-width:0; overflow:hidden; }}
 
 /* ── Sequence panel ── */
-#ab-seq-panel {{ background:#1a1a2e; padding:4px 8px; max-height:110px; overflow-y:auto; }}
+#ab-seq-panel {{ flex-shrink:0; background:#1a1a2e; padding:4px 8px; max-height:110px; overflow-y:auto; }}
 .ab-seq-row {{ display:flex; align-items:flex-start; gap:6px; margin-bottom:4px; }}
-.ab-seq-lbl {{
-  font-size:11px; font-weight:bold; white-space:nowrap;
-  width:68px; flex-shrink:0; padding-top:2px;
-}}
+.ab-seq-lbl {{ font-size:11px; font-weight:bold; white-space:nowrap; width:68px; flex-shrink:0; padding-top:2px; }}
 .ab-seq-body {{ display:flex; flex-wrap:wrap; gap:1px; }}
 .ab-seq-aa {{
   display:inline-block; width:13px; text-align:center;
@@ -610,73 +594,113 @@ label.ab-chk input {{ cursor:pointer; }}
 .ab-seq-aa:hover {{ outline:1px solid #fff; }}
 .ab-seq-sel {{ outline:2px solid #fff !important; }}
 
-/* ── Viewer ── */
-#ab-viewer {{ width:{width}px; height:{viewer_h}px; position:relative; }}
+/* ── 3D Viewer ── */
+#ab-viewer {{ flex:1; position:relative; min-height:0; }}
 
-/* ── Surface opacity row ── */
-#ab-surf-row {{ display:none; align-items:center; gap:6px; }}
+/* ── Right panel ── */
+#ab-right {{
+  display:flex; flex-direction:row; flex-shrink:0;
+  width:224px; transition:width 0.2s ease; overflow:hidden;
+  background:#1e1e38; border-left:1px solid #2a2a48;
+}}
+#ab-right.collapsed {{ width:24px; }}
+
+/* Collapse tab (left edge of panel) */
+#ab-ctrl-tab {{
+  width:24px; flex-shrink:0;
+  background:#252545; cursor:pointer; user-select:none;
+  display:flex; align-items:center; justify-content:center;
+  font-size:13px; color:#aaa;
+  border-right:1px solid #2a2a48;
+}}
+#ab-ctrl-tab:hover {{ background:#2e2e58; color:#fff; }}
+
+/* Panel content */
+#ab-ctrl-content {{
+  flex:1; overflow-y:auto; overflow-x:hidden;
+  padding:10px 8px; display:flex; flex-direction:column; gap:12px;
+}}
+#ab-right.collapsed #ab-ctrl-content {{ display:none; }}
+
+.ab-ctrl-section {{ display:flex; flex-direction:column; gap:5px; }}
+.ab-ctrl-section b {{ font-size:10px; color:#888; text-transform:uppercase; letter-spacing:.07em; }}
+.ab-ctrl-row {{ display:flex; flex-wrap:wrap; gap:5px; align-items:center; }}
+label.ab-chk {{ display:flex; align-items:center; gap:4px; cursor:pointer; font-size:11px; }}
+label.ab-chk input {{ cursor:pointer; }}
+.ab-dim {{ opacity:0.45; }}
+#ab-surf-row {{ display:none; align-items:center; gap:5px; flex-wrap:wrap; }}
+hr.ab-sep {{ border:none; border-top:1px solid #2a2a48; margin:0; }}
 </style>
 </head><body>
 <div id="ab-wrap">
 
-<!-- Controls -->
-<div class="ab-ctrl-header" onclick="abToggleControls()">
-  <span>⚙ Controls</span><span id="ab-ctrl-arrow">▲</span>
+<!-- Left: sequence panel + viewer -->
+<div id="ab-left">
+  <div id="ab-seq-panel"></div>
+  <div id="ab-viewer"></div>
 </div>
-<div id="ab-ctrl-body">
 
-  <div class="ab-ctrl-section">
-    <b>Chains</b>
-    <div class="ab-ctrl-row" id="ab-chain-checks"></div>
-  </div>
+<!-- Right: collapsible controls panel -->
+<div id="ab-right">
+  <div id="ab-ctrl-tab" onclick="abToggleControls()" title="Toggle controls">◀</div>
+  <div id="ab-ctrl-content">
 
-  <div class="ab-ctrl-section">
-    <b>Style</b>
-    <div class="ab-ctrl-row">
-      <label class="ab-chk"><input type="radio" name="ab-style" value="cartoon" checked onchange="abRender()"> Cartoon</label>
-      <label class="ab-chk"><input type="radio" name="ab-style" value="surface" onchange="abRender()"> Surface</label>
+    <div class="ab-ctrl-section">
+      <b>Chains</b>
+      <div class="ab-ctrl-row" id="ab-chain-checks"></div>
     </div>
-    <div style="display:flex; align-items:center; gap:6px; margin-top:4px;">
-      <span style="font-size:11px; white-space:nowrap">Framework opacity</span>
-      <input type="range" id="ab-fw-opacity" min="0.0" max="1.0" step="0.05" value="0.75"
-             style="width:90px" oninput="document.getElementById('ab-fw-val').textContent=Math.round(parseFloat(this.value)*100)+'%';abRender()">
-      <span id="ab-fw-val" style="font-size:11px;width:28px">75%</span>
+
+    <hr class="ab-sep">
+
+    <div class="ab-ctrl-section">
+      <b>Style</b>
+      <div class="ab-ctrl-row">
+        <label class="ab-chk"><input type="radio" name="ab-style" value="cartoon" checked onchange="abRender()"> Cartoon</label>
+        <label class="ab-chk"><input type="radio" name="ab-style" value="surface" onchange="abRender()"> Surface</label>
+      </div>
+      <div style="display:flex; align-items:center; gap:5px; margin-top:2px;">
+        <span style="font-size:10px; white-space:nowrap; color:#aaa">Framework</span>
+        <input type="range" id="ab-fw-opacity" min="0.0" max="1.0" step="0.05" value="0.75"
+               style="flex:1; min-width:0" oninput="document.getElementById('ab-fw-val').textContent=Math.round(parseFloat(this.value)*100)+'%';abRender()">
+        <span id="ab-fw-val" style="font-size:10px;width:30px;text-align:right">75%</span>
+      </div>
+      <div id="ab-surf-row">
+        <span style="font-size:10px; color:#aaa">Surface</span>
+        <input type="range" id="ab-surf-opacity" min="0.1" max="1.0" step="0.05" value="0.7"
+               style="flex:1; min-width:0" oninput="abRender()">
+        <span id="ab-surf-val" style="font-size:10px;width:30px;text-align:right">0.7</span>
+      </div>
     </div>
-    <div id="ab-surf-row">
-      <span style="font-size:11px">Surface opacity</span>
-      <input type="range" id="ab-surf-opacity" min="0.1" max="1.0" step="0.05" value="0.7"
-             style="width:90px" oninput="abRender()">
-      <span id="ab-surf-val">0.7</span>
+
+    <hr class="ab-sep">
+
+    <div class="ab-ctrl-section">
+      <b>CDRs</b>
+      <div class="ab-ctrl-row" id="ab-cdr-checks"></div>
     </div>
-  </div>
 
-  <div class="ab-ctrl-section">
-    <b>CDRs</b>
-    <div class="ab-ctrl-row" id="ab-cdr-checks"></div>
-  </div>
+    <hr class="ab-sep">
 
-  <div class="ab-ctrl-section">
-    <b>Interactions</b>
-    <div class="ab-ctrl-row" id="ab-itype-checks"></div>
-  </div>
-
-  <div class="ab-ctrl-section">
-    <b>Background</b>
-    <div class="ab-ctrl-row">
-      <label class="ab-chk"><input type="radio" name="ab-bg" value="0x1a1a2e" checked onchange="abChangeBg(this.value)"> Dark</label>
-      <label class="ab-chk"><input type="radio" name="ab-bg" value="0x000000" onchange="abChangeBg(this.value)"> Black</label>
-      <label class="ab-chk"><input type="radio" name="ab-bg" value="0xffffff" onchange="abChangeBg(this.value)"> White</label>
-      <label class="ab-chk"><input type="radio" name="ab-bg" value="0x888888" onchange="abChangeBg(this.value)"> Grey</label>
+    <div class="ab-ctrl-section">
+      <b>Interactions</b>
+      <div class="ab-ctrl-row" id="ab-itype-checks"></div>
     </div>
-  </div>
 
-</div><!-- end ctrl-body -->
+    <hr class="ab-sep">
 
-<!-- Sequence panel -->
-<div id="ab-seq-panel"></div>
+    <div class="ab-ctrl-section">
+      <b>Background</b>
+      <div class="ab-ctrl-row">
+        <label class="ab-chk"><input type="radio" name="ab-bg" value="0x1a1a2e" checked onchange="abChangeBg(this.value)"> Dark</label>
+        <label class="ab-chk"><input type="radio" name="ab-bg" value="0x000000" onchange="abChangeBg(this.value)"> Black</label>
+        <label class="ab-chk"><input type="radio" name="ab-bg" value="0xffffff" onchange="abChangeBg(this.value)"> White</label>
+        <label class="ab-chk"><input type="radio" name="ab-bg" value="0x888888" onchange="abChangeBg(this.value)"> Grey</label>
+      </div>
+    </div>
 
-<!-- 3D Viewer -->
-<div id="ab-viewer"></div>
+  </div><!-- end ctrl-content -->
+</div><!-- end ab-right -->
+
 </div><!-- end wrap -->
 
 <script>
@@ -920,15 +944,18 @@ $(function() {{
     viewer.render();
   }};
 
-  // ── Collapsible controls ──────────────────────────────────────────────────
+  // ── Collapsible right panel ───────────────────────────────────────────────
   window.abToggleControls = function() {{
-    var body  = document.getElementById("ab-ctrl-body");
-    var arrow = document.getElementById("ab-ctrl-arrow");
-    if (body.style.display === "none") {{
-      body.style.display = "flex"; arrow.textContent = "▲";
+    var panel = document.getElementById("ab-right");
+    var tab   = document.getElementById("ab-ctrl-tab");
+    if (panel.classList.contains("collapsed")) {{
+      panel.classList.remove("collapsed");
+      tab.textContent = "◀";
     }} else {{
-      body.style.display = "none"; arrow.textContent = "▼";
+      panel.classList.add("collapsed");
+      tab.textContent = "▶";
     }}
+    setTimeout(function() {{ viewer.resize(); viewer.render(); }}, 220);
   }};
 
   // ── Initial render ────────────────────────────────────────────────────────
@@ -940,6 +967,8 @@ $(function() {{
     viewer.zoomTo();
   }}
   viewer.render();
+  // Let flex layout settle then resize so 3Dmol fills the correct dimensions.
+  setTimeout(function() {{ viewer.resize(); viewer.render(); }}, 50);
 }});
 </script>
 </body></html>"""
