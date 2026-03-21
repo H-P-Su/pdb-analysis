@@ -991,7 +991,7 @@ function updateScene() {{
     var viSurfOpacity = parseFloat(document.getElementById('vi-surf-opacity').value);
     document.getElementById('vi-surf-opacity-val').textContent = viSurfOpacity.toFixed(2);
     viewer.setStyle({{}}, {{cartoon: {{opacity: 0.2, color: '#888888'}}}});
-    var surfP = viewer.addSurface($3Dmol.SurfaceType.VDW, Object.assign({{opacity: viSurfOpacity}}, viCol), {{hetflag: false}});
+    var surfP = viewer.addSurface($3Dmol.SurfaceType.VDW, Object.assign({{}}, viCol, {{opacity: viSurfOpacity}}), {{hetflag: false}});
     Promise.resolve(surfP).then(function(id) {{
       if (myEpoch !== viSurfaceEpoch) {{
         viewer.removeSurface(id);

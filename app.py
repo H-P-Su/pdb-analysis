@@ -758,7 +758,7 @@ $(document).ready(function() {{
       var surfOpacity = parseFloat(document.getElementById('surf-opacity').value);
       document.getElementById('surf-opacity-val').textContent = surfOpacity.toFixed(2);
       viewer.setStyle({{}},{{cartoon:{{opacity:0.25,color:'#888888'}}}});
-      var surfP = viewer.addSurface($3Dmol.SurfaceType.VDW, Object.assign({{opacity:surfOpacity}},col), {{hetflag:false}});
+      var surfP = viewer.addSurface($3Dmol.SurfaceType.VDW, Object.assign({{}},col,{{opacity:surfOpacity}}), {{hetflag:false}});
       Promise.resolve(surfP).then(function(id) {{
         if (myEpoch !== surfaceEpoch) {{
           viewer.removeSurface(id);  // style changed while computing — discard
