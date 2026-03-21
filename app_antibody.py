@@ -437,7 +437,7 @@ def _classify_interaction(ag_resname: str, ab_resname: str, atom_pairs: list) ->
     return "VdW"
 
 
-_EPITOPE_COLOR = "#00ccff"   # cyan  — antigen epitope residues
+_EPITOPE_COLOR = "#888888"   # grey  — antigen epitope residues
 
 def _render_antibody_html(pdb_bytes: bytes, ab_data: dict,
                           width: int = 1100, height: int = 780) -> str:
@@ -597,21 +597,21 @@ body {{ margin:0; background:#1a1a2e; color:#e8e8f0; font-family:sans-serif; fon
 /* ── 3D Viewer ── */
 #ab-viewer {{ flex:1; position:relative; min-height:0; }}
 
-/* ── Right panel ── */
+/* ── Left panel ── */
 #ab-right {{
   display:flex; flex-direction:row; flex-shrink:0;
   width:224px; transition:width 0.2s ease; overflow:hidden;
-  background:#1e1e38; border-left:1px solid #2a2a48;
+  background:#1e1e38; border-right:1px solid #2a2a48;
 }}
 #ab-right.collapsed {{ width:24px; }}
 
-/* Collapse tab (left edge of panel) */
+/* Collapse tab (right edge of panel) */
 #ab-ctrl-tab {{
-  width:24px; flex-shrink:0;
+  width:24px; flex-shrink:0; order:2;
   background:#252545; cursor:pointer; user-select:none;
   display:flex; align-items:center; justify-content:center;
   font-size:13px; color:#aaa;
-  border-right:1px solid #2a2a48;
+  border-left:1px solid #2a2a48;
 }}
 #ab-ctrl-tab:hover {{ background:#2e2e58; color:#fff; }}
 
@@ -634,15 +634,9 @@ hr.ab-sep {{ border:none; border-top:1px solid #2a2a48; margin:0; }}
 </head><body>
 <div id="ab-wrap">
 
-<!-- Left: sequence panel + viewer -->
-<div id="ab-left">
-  <div id="ab-seq-panel"></div>
-  <div id="ab-viewer"></div>
-</div>
-
-<!-- Right: collapsible controls panel -->
+<!-- Left: collapsible controls panel -->
 <div id="ab-right">
-  <div id="ab-ctrl-tab" onclick="abToggleControls()" title="Toggle controls">◀</div>
+  <div id="ab-ctrl-tab" onclick="abToggleControls()" title="Toggle controls">▶</div>
   <div id="ab-ctrl-content">
 
     <div class="ab-ctrl-section">
@@ -699,7 +693,13 @@ hr.ab-sep {{ border:none; border-top:1px solid #2a2a48; margin:0; }}
     </div>
 
   </div><!-- end ctrl-content -->
-</div><!-- end ab-right -->
+</div><!-- end ab-right (left panel) -->
+
+<!-- Right: sequence panel + viewer -->
+<div id="ab-left">
+  <div id="ab-seq-panel"></div>
+  <div id="ab-viewer"></div>
+</div>
 
 </div><!-- end wrap -->
 
@@ -950,10 +950,10 @@ $(function() {{
     var tab   = document.getElementById("ab-ctrl-tab");
     if (panel.classList.contains("collapsed")) {{
       panel.classList.remove("collapsed");
-      tab.textContent = "◀";
+      tab.textContent = "▶";
     }} else {{
       panel.classList.add("collapsed");
-      tab.textContent = "▶";
+      tab.textContent = "◀";
     }}
     setTimeout(function() {{ viewer.resize(); viewer.render(); }}, 220);
   }};
@@ -961,7 +961,19 @@ $(function() {{
   // ── Initial render ────────────────────────────────────────────────────────
   abBuildSeq();
   abRender();
-  if (ZOOM_CHAIN && ZOOM_RESI) {{
+  // Zoom to the paratope–epitope interface; fall back to CDR zoom or all atoms.
+  var ifaceChains = [];
+  EPITOPE_DATA.forEach(function(e) {{
+    if (ifaceChains.indexOf(e.chain) < 0) ifaceChains.push(e.chain);
+  }});
+  Object.keys(AB_CONTACT_BY_TYPE).forEach(function(typ) {{
+    AB_CONTACT_BY_TYPE[typ].forEach(function(e) {{
+      if (ifaceChains.indexOf(e.chain) < 0) ifaceChains.push(e.chain);
+    }});
+  }});
+  if (ifaceChains.length > 0) {{
+    viewer.zoomTo({{chain:ifaceChains}});
+  }} else if (ZOOM_CHAIN && ZOOM_RESI) {{
     viewer.zoomTo({{chain:ZOOM_CHAIN, resi:ZOOM_RESI}});
   }} else {{
     viewer.zoomTo();
