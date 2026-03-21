@@ -691,6 +691,8 @@ $(document).ready(function() {{
     renderAll();
   }});
 
+  window.renderAll = renderAll;
+
   renderAll();
   drawDisulfLines();
   drawLabels();
