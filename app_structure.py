@@ -50,14 +50,6 @@ from visualize_interactions import (
     plot_ligand_2d,
 )
 
-# ── Page config ────────────────────────────────────────────────────────────────
-st.set_page_config(
-    page_title="PDB Structure Analyzer",
-    page_icon="🔬",
-    layout="wide",
-    initial_sidebar_state="collapsed",
-)
-
 st.markdown("""
 <style>
 .stTabs [data-baseweb="tab-list"] { gap: 6px; }
