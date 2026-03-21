@@ -642,6 +642,27 @@ body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 .role-pos {{ color: #4488ff; }}
 .role-neg {{ color: #ff4444; }}
 .empty {{ font-size: 12px; color: #aaa; font-style: italic; }}
+#vi-controls {{
+  position:absolute; top:10px; left:10px; z-index:100;
+  background:rgba(13,17,23,0.88); border-radius:8px; padding:10px 14px;
+  font-size:13px; min-width:220px; color:#cdd3de;
+}}
+#vi-controls h4 {{ margin:0 0 8px; color:#e6edf3; font-size:13px; }}
+.vi-section {{ color:#8b949e; font-size:10px; text-transform:uppercase;
+              letter-spacing:0.8px; margin:8px 0 4px; border-top:1px solid #21262d;
+              padding-top:6px; }}
+.vi-row {{ margin:3px 0; display:flex; align-items:center; gap:6px; cursor:pointer; }}
+.vi-grid {{ display:grid; grid-template-columns:1fr 1fr; gap:2px 6px; margin-bottom:2px; }}
+.vi-bg-row {{ display:flex; align-items:center; gap:5px; margin-top:5px; }}
+.vi-bg-btn {{ width:18px; height:18px; border-radius:3px; border:2px solid transparent;
+             cursor:pointer; flex-shrink:0; }}
+.vi-bg-btn.active {{ border-color:#e6edf3; }}
+.vi-btn {{ background:rgba(255,255,255,0.08); border:1px solid #30363d; color:#cdd3de;
+          border-radius:4px; padding:3px 9px; cursor:pointer; font-size:12px; }}
+.vi-btn:hover {{ background:rgba(255,255,255,0.18); }}
+#vi-toast {{ display:none; position:absolute; bottom:14px; right:14px; z-index:200;
+            background:rgba(46,160,67,0.9); color:white; border-radius:6px;
+            padding:5px 12px; font-size:12px; pointer-events:none; }}
 </style>
 </head>
 <body>
@@ -650,7 +671,47 @@ body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   <div class="subtitle">{subtitle}</div>
 </div>
 <div class="body">
-  <div id="viewer-wrap"><div id="viewer"></div></div>
+  <div id="viewer-wrap"><div id="viewer"></div>
+<div id="vi-controls">
+  <h4>🔬 Viewer Controls</h4>
+
+  <div class="vi-section">Style</div>
+  <div class="vi-grid">
+    <label class="vi-row"><input type="radio" name="vi-style" value="cartoon" checked><span>Cartoon</span></label>
+    <label class="vi-row"><input type="radio" name="vi-style" value="stick"><span>Stick</span></label>
+    <label class="vi-row"><input type="radio" name="vi-style" value="sphere"><span>Sphere</span></label>
+    <label class="vi-row"><input type="radio" name="vi-style" value="line"><span>Line</span></label>
+    <label class="vi-row"><input type="radio" name="vi-style" value="surface"><span>Surface</span></label>
+  </div>
+
+  <div class="vi-section">Color</div>
+  <div class="vi-grid">
+    <label class="vi-row"><input type="radio" name="vi-color" value="default" checked><span>Default</span></label>
+    <label class="vi-row"><input type="radio" name="vi-color" value="spectrum"><span>Spectrum</span></label>
+    <label class="vi-row"><input type="radio" name="vi-color" value="ss"><span>Sec. struct.</span></label>
+    <label class="vi-row"><input type="radio" name="vi-color" value="chain"><span>Chain</span></label>
+  </div>
+
+  <div class="vi-section">Options</div>
+  <label class="vi-row"><input type="checkbox" id="vi-spin"><span>Spin</span></label>
+  <label class="vi-row"><input type="checkbox" id="vi-ortho"><span>Orthographic</span></label>
+  <div class="vi-bg-row">
+    <span style="color:#8b949e;font-size:11px;">BG</span>
+    <div class="vi-bg-btn active" id="vi-bg0" style="background:#ffffff;border-color:#999;" title="White" onclick="viBg('#ffffff','vi-bg0')"></div>
+    <div class="vi-bg-btn" id="vi-bg1" style="background:#0d1117;" title="Dark" onclick="viBg('#0d1117','vi-bg1')"></div>
+    <div class="vi-bg-btn" id="vi-bg2" style="background:#000000;" title="Black" onclick="viBg('#000000','vi-bg2')"></div>
+    <div class="vi-bg-btn" id="vi-bg3" style="background:#3d444d;" title="Grey" onclick="viBg('#3d444d','vi-bg3')"></div>
+  </div>
+
+  <div class="vi-section">Screenshot</div>
+  <label class="vi-row"><input type="checkbox" id="vi-transparent"><span>Transparent BG</span></label>
+  <div style="display:flex;gap:5px;margin-top:5px;">
+    <button class="vi-btn" onclick="viSave()" title="Download PNG">📥 Save</button>
+    <button class="vi-btn" onclick="viCopy()" title="Copy to clipboard">📋 Copy</button>
+  </div>
+</div>
+<div id="vi-toast">✓ Copied to clipboard</div>
+</div>
   <div class="panel">
     <div class="toggles">
       <div class="toggles-title">Show / Hide</div>
@@ -713,11 +774,117 @@ var labelSpecs = {{
   salt:   {J(salt_label_specs)}
 }};
 
+var viCurrentSurface = null;
+var viSurfaceEpoch   = 0;
+var viCurrentBg      = 'white';
+
 var viewer;
 
+function viGetColorSpec() {{
+  var s = document.querySelector('input[name="vi-color"]:checked').value;
+  if (s === 'default')   return {{color: '#b8b8b8', opacity: 0.75}};
+  if (s === 'spectrum')  return {{colorscheme: 'spectrum'}};
+  if (s === 'ss')        return {{colorscheme: 'ssJmol'}};
+  if (s === 'chain')     return {{colorscheme: 'chainHetatm'}};
+  return {{color: '#b8b8b8', opacity: 0.75}};
+}}
+
+function viBg(color, btnId) {{
+  viCurrentBg = color;
+  viewer.setBackgroundColor(color);
+  viewer.render();
+  document.querySelectorAll('.vi-bg-btn').forEach(function(b) {{ b.classList.remove('active'); }});
+  document.getElementById(btnId).classList.add('active');
+}}
+
+function viParseBgRGB(hex) {{
+  var c = document.createElement('canvas'); c.width = c.height = 1;
+  var ctx = c.getContext('2d');
+  ctx.fillStyle = hex; ctx.fillRect(0,0,1,1);
+  return ctx.getImageData(0,0,1,1).data;
+}}
+
+function viCaptureURI() {{
+  var baseURI = viewer.pngURI();
+  if (!document.getElementById('vi-transparent').checked) return Promise.resolve(baseURI);
+  return new Promise(function(resolve) {{
+    var img = new Image();
+    img.onload = function() {{
+      var c = document.createElement('canvas');
+      c.width = img.width; c.height = img.height;
+      var ctx = c.getContext('2d');
+      ctx.drawImage(img, 0, 0);
+      var d = ctx.getImageData(0, 0, c.width, c.height);
+      var px = d.data;
+      var bg = viParseBgRGB(viCurrentBg);
+      var thr = 18;
+      for (var i = 0; i < px.length; i += 4) {{
+        if (Math.abs(px[i]-bg[0]) + Math.abs(px[i+1]-bg[1]) + Math.abs(px[i+2]-bg[2]) < thr*3)
+          px[i+3] = 0;
+      }}
+      ctx.putImageData(d, 0, 0);
+      resolve(c.toDataURL('image/png'));
+    }};
+    img.src = baseURI;
+  }});
+}}
+
+function viSave() {{
+  viCaptureURI().then(function(uri) {{
+    var a = document.createElement('a');
+    a.href = uri; a.download = 'structure.png'; a.click();
+  }});
+}}
+
+function viCopy() {{
+  viCaptureURI().then(function(uri) {{
+    fetch(uri).then(function(r) {{ return r.blob(); }}).then(function(blob) {{
+      navigator.clipboard.write([new ClipboardItem({{'image/png': blob}})])
+        .then(function() {{
+          var t = document.getElementById('vi-toast');
+          t.style.display = 'block';
+          setTimeout(function() {{ t.style.display = 'none'; }}, 1800);
+        }})
+        .catch(function() {{
+          alert('Clipboard blocked — use Save, or try in Chrome/Edge over HTTPS.');
+        }});
+    }});
+  }});
+}}
+
 function updateScene() {{
-  // 1. Reset: base cartoon
-  viewer.setStyle({{}}, {{cartoon: {{color: "#b8b8b8", opacity: 0.75}}}});
+  // 1. Reset: base style (respects vi-style and vi-color controls)
+  if (viCurrentSurface !== null) {{
+    viewer.removeSurface(viCurrentSurface); viCurrentSurface = null;
+  }}
+  viSurfaceEpoch++;
+  var myEpoch = viSurfaceEpoch;
+
+  var viStyleVal = document.querySelector('input[name="vi-style"]:checked').value;
+  var viCol = viGetColorSpec();
+
+  viewer.setStyle({{}}, {{}});
+  viewer.setStyle({{resn: WATER_NAMES}}, {{}});
+
+  if (viStyleVal === 'cartoon') {{
+    viewer.setStyle({{}}, {{cartoon: viCol}});
+  }} else if (viStyleVal === 'stick') {{
+    viewer.setStyle({{}}, {{stick: Object.assign({{radius: 0.12}}, viCol)}});
+  }} else if (viStyleVal === 'sphere') {{
+    viewer.setStyle({{}}, {{sphere: Object.assign({{scale: 0.4}}, viCol)}});
+  }} else if (viStyleVal === 'line') {{
+    viewer.setStyle({{}}, {{line: viCol}});
+  }} else if (viStyleVal === 'surface') {{
+    viewer.setStyle({{}}, {{cartoon: {{opacity: 0.2, color: '#888888'}}}});
+    var surfP = viewer.addSurface($3Dmol.SurfaceType.VDW, Object.assign({{opacity: 0.85}}, viCol));
+    Promise.resolve(surfP).then(function(id) {{
+      if (myEpoch !== viSurfaceEpoch) {{
+        viewer.removeSurface(id);
+      }} else {{
+        viCurrentSurface = id;
+      }}
+    }});
+  }}
   viewer.setStyle({{resn: WATER_NAMES}}, {{}});
 
   // 2. Ligand always on
@@ -772,11 +939,24 @@ function setAll(on) {{
 
 window.addEventListener("DOMContentLoaded", function() {{
   viewer = $3Dmol.createViewer(document.getElementById("viewer"),
-                               {{backgroundColor: "white"}});
+                               {{backgroundColor: "white", antialias: true}});
   viewer.addModel(PDB_DATA, "pdb");
   updateScene();
   viewer.zoomTo({{chain: LIG_CHAIN, resi: LIG_RESI}});
   viewer.render();
+  document.querySelectorAll('input[name="vi-style"]').forEach(function(r) {{
+    r.addEventListener('change', updateScene);
+  }});
+  document.querySelectorAll('input[name="vi-color"]').forEach(function(r) {{
+    r.addEventListener('change', updateScene);
+  }});
+  document.getElementById('vi-spin').addEventListener('change', function() {{
+    this.checked ? viewer.spin('y', 1) : viewer.spin(false);
+  }});
+  document.getElementById('vi-ortho').addEventListener('change', function() {{
+    viewer.setProjection(this.checked ? 'orthographic' : 'perspective');
+    viewer.render();
+  }});
 }});
 </script>
 </body>
