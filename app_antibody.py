@@ -636,8 +636,14 @@ label.ab-chk input {{ cursor:pointer; }}
       <label class="ab-chk"><input type="radio" name="ab-style" value="cartoon" checked onchange="abRender()"> Cartoon</label>
       <label class="ab-chk"><input type="radio" name="ab-style" value="surface" onchange="abRender()"> Surface</label>
     </div>
+    <div style="display:flex; align-items:center; gap:6px; margin-top:4px;">
+      <span style="font-size:11px; white-space:nowrap">Framework opacity</span>
+      <input type="range" id="ab-fw-opacity" min="0.0" max="1.0" step="0.05" value="0.25"
+             style="width:90px" oninput="document.getElementById('ab-fw-val').textContent=parseFloat(this.value).toFixed(2);abRender()">
+      <span id="ab-fw-val" style="font-size:11px;width:28px">0.25</span>
+    </div>
     <div id="ab-surf-row">
-      <span style="font-size:11px">Opacity</span>
+      <span style="font-size:11px">Surface opacity</span>
       <input type="range" id="ab-surf-opacity" min="0.1" max="1.0" step="0.05" value="0.7"
              style="width:90px" oninput="abRender()">
       <span id="ab-surf-val">0.7</span>
@@ -746,8 +752,9 @@ $(function() {{
 
   // ── Main render function ──────────────────────────────────────────────────
   window.abRender = function() {{
-    var style = document.querySelector('input[name="ab-style"]:checked').value;
+    var style      = document.querySelector('input[name="ab-style"]:checked').value;
     var surfOpacity = parseFloat(document.getElementById("ab-surf-opacity").value);
+    var fwOpacity   = parseFloat(document.getElementById("ab-fw-opacity").value);
     document.getElementById("ab-surf-row").style.display =
       style === "surface" ? "flex" : "none";
 
@@ -764,13 +771,11 @@ $(function() {{
       var ctype   = CHAIN_TYPES[cid] || "Unknown";
       var col     = CHAIN_COLORS[ctype] || "#888888";
       var isPrim  = DEFAULT_ON[cid];
-      var opacity = 0.25;
-
       if (style === "cartoon") {{
-        viewer.setStyle({{chain:cid}}, {{cartoon:{{color:col, opacity:opacity}}}});
+        viewer.setStyle({{chain:cid}}, {{cartoon:{{color:col, opacity:fwOpacity}}}});
       }} else {{
-        // Surface: use base color, will add surface below
-        viewer.setStyle({{chain:cid}}, {{cartoon:{{color:col, opacity:0.15}}}});
+        // Surface: ghost cartoon underneath
+        viewer.setStyle({{chain:cid}}, {{cartoon:{{color:col, opacity:Math.min(fwOpacity, 0.15)}}}});
       }}
     }});
 
