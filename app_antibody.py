@@ -758,8 +758,9 @@ $(function() {{
     document.getElementById("ab-surf-row").style.display =
       style === "surface" ? "flex" : "none";
 
-    // Remove previous surface
-    if (surfObj !== null) {{ viewer.removeSurface(surfObj); surfObj = null; }}
+    // Remove all surfaces (removeAllSurfaces is synchronous, avoids Promise timing issues)
+    viewer.removeAllSurfaces();
+    surfObj = null;
 
     // Clear all styles
     viewer.setStyle({{}}, {{}});
