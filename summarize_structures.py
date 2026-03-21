@@ -408,8 +408,19 @@ def plot_bfactor(data: list[dict], output_path: str | Path,
 
     chains = sorted(set(r["chain"] for r in data))
     n_chains = len(chains)
-    fig, axes = plt.subplots(n_chains, 1,
-                              figsize=(max(10, len(data) * 0.06 + 2), 3.5 * n_chains),
+    # Cap figure dimensions so PIL never hits its decompression-bomb limit.
+    # PIL rejects images > ~179 MP; at 150 DPI that is ~7950 sq-in.
+    # We hard-cap width at 50 in and height at 3.5 in/chain (max 20 chains shown).
+    _MAX_CHAINS_SHOWN = 20
+    n_plot = min(n_chains, _MAX_CHAINS_SHOWN)
+    chains = chains[:n_plot]
+    fig_w = min(50, max(10, len(data) * 0.06 + 2))
+    fig_h = 3.5 * n_plot
+    # Compute a safe DPI so width_px * height_px < 150 MP
+    dpi = min(150, int((150_000_000 / (fig_w * fig_h)) ** 0.5))
+    dpi = max(72, dpi)
+    fig, axes = plt.subplots(n_plot, 1,
+                              figsize=(fig_w, fig_h),
                               squeeze=False)
 
     for ax, chain in zip(axes[:, 0], chains):
@@ -451,7 +462,7 @@ def plot_bfactor(data: list[dict], output_path: str | Path,
 
     plt.tight_layout()
     output_path = Path(output_path)
-    plt.savefig(output_path, dpi=150, bbox_inches="tight", facecolor="white")
+    plt.savefig(output_path, dpi=dpi, bbox_inches="tight", facecolor="white")
     plt.close()
     print(f"  Saved B-factor plot  → {output_path}")
     return output_path
@@ -799,8 +810,12 @@ def plot_bsa_matrix(
         matrix[i, j] = r["bsa_total"]
         matrix[j, i] = r["bsa_total"]   # symmetric
 
+    fig_w = min(60, max(8, n * 1.4 + 4))
+    fig_h = min(40, max(5, n * 1.2))
+    dpi_bsa = min(150, int((150_000_000 / (fig_w * fig_h)) ** 0.5))
+    dpi_bsa = max(72, dpi_bsa)
     fig, (ax_heat, ax_bar) = plt.subplots(
-        1, 2, figsize=(max(8, n * 1.4 + 4), max(5, n * 1.2)),
+        1, 2, figsize=(fig_w, fig_h),
         gridspec_kw={"width_ratios": [n, max(2, n // 2)]},
     )
 
@@ -851,7 +866,7 @@ def plot_bsa_matrix(
 
     plt.tight_layout()
     output_path = Path(output_path)
-    plt.savefig(output_path, dpi=150, bbox_inches="tight", facecolor="white")
+    plt.savefig(output_path, dpi=dpi_bsa, bbox_inches="tight", facecolor="white")
     plt.close()
     print(f"  Saved BSA matrix   → {output_path}")
     return output_path

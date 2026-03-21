@@ -387,16 +387,18 @@ with tab_bsa:
                                    file_name=f"{pdb_path.stem}_bsa_matrix.png", mime="image/png")
                 st.divider()
                 st.markdown("#### Pairwise BSA table")
-                df_bsa = pd.DataFrame(bsa_results)
-                df_bsa.columns = [
-                    "Chain 1", "Chain 2",
-                    "SASA 1 (Å²)", "SASA 2 (Å²)", "SASA complex (Å²)",
-                    "BSA total (Å²)", "BSA on 1 (Å²)", "BSA on 2 (Å²)",
-                    "Interface % 1", "Interface % 2",
-                ]
+                df_bsa = pd.DataFrame(bsa_results).rename(columns={
+                    "chain_1": "Chain 1", "chain_2": "Chain 2",
+                    "sasa_1": "SASA 1 (A\u00b2)", "sasa_2": "SASA 2 (A\u00b2)",
+                    "sasa_complex": "SASA complex (A\u00b2)",
+                    "bsa_total": "BSA total (A\u00b2)",
+                    "bsa_on_1": "BSA on 1 (A\u00b2)", "bsa_on_2": "BSA on 2 (A\u00b2)",
+                    "interface_pct_1": "Interface % 1", "interface_pct_2": "Interface % 2",
+                })
+                bsa_col = "BSA total (A\u00b2)"
                 st.dataframe(
-                    df_bsa.style.background_gradient(subset=["BSA total (Å²)"], cmap="YlOrRd"),
-                    use_container_width=True, hide_index=True,
+                    df_bsa.style.background_gradient(subset=[bsa_col], cmap="YlOrRd"),
+                    hide_index=True,
                 )
                 st.download_button("⬇ BSA table CSV", df_bsa.to_csv(index=False),
                                    file_name=f"{pdb_path.stem}_bsa.csv", mime="text/csv")
@@ -417,11 +419,12 @@ with tab_bsa:
                         if (r["chain_1"] == cid or r["chain_2"] == cid) and r["bsa_total"] > 0
                     )
                     sasa_rows.append({
-                        "Chain": cid, "SASA isolated (Å²)": sv,
-                        "Total buried (Å²)": round(tb, 1),
+                        "Chain": cid,
+                        "SASA isolated (A\u00b2)": round(sv, 1) if sv else None,
+                        "Total buried (A\u00b2)": round(tb, 1),
                         "% buried": round(100 * tb / sv, 1) if sv else None,
                     })
-                st.dataframe(pd.DataFrame(sasa_rows), use_container_width=True, hide_index=True)
+                st.dataframe(pd.DataFrame(sasa_rows), hide_index=True)
 
 
 # ─── TAB 3: 3D Viewer + Ligand Analysis ───────────────────────────────────────

@@ -18,5 +18,6 @@ st.set_page_config(
 pg = st.navigation([
     st.Page("app_structure.py",  title="Structure Analyzer", icon="🔬"),
     st.Page("app_alphafold.py",  title="AlphaFold + Variants", icon="🧬"),
+    st.Page("app_antibody.py",   title="Antibody Analyzer", icon="🧫"),
 ])
 pg.run()
