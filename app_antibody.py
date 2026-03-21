@@ -490,7 +490,7 @@ def _render_antibody_html(pdb_bytes: bytes, ab_data: dict,
     for c in pe:
         epitope_resi_set.setdefault(c["Ag chain"], set()).add(c["Ag resi"])
     epitope_entries = [
-        {"chain": cid, "resi": ",".join(str(r) for r in sorted(rs))}
+        {"chain": cid, "resi": sorted(rs)}
         for cid, rs in epitope_resi_set.items()
     ]
 
@@ -526,7 +526,7 @@ def _render_antibody_html(pdb_bytes: bytes, ab_data: dict,
         for c in pe:
             acc.setdefault(c["Interaction"], {}).setdefault(c[chain_key], set()).add(c[resi_key])
         return {
-            itype: [{"chain": cid, "resi": ",".join(str(r) for r in sorted(rs))}
+            itype: [{"chain": cid, "resi": sorted(rs)}
                     for cid, rs in chain_map.items()]
             for itype, chain_map in acc.items()
         }
