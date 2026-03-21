@@ -798,21 +798,14 @@ $(function() {{
       }});
     }});
 
-    // Epitope residues — cartoon always shown; sticks only for active types.
+    // Epitope residues — cartoon + sticks always shown.
     EPITOPE_DATA.forEach(function(e) {{
       var chainChk = document.getElementById("ab-cc-" + e.chain);
       if (chainChk && !chainChk.checked) return;
       viewer.setStyle({{chain:e.chain, resi:e.resi}},
                       {{cartoon:{{color:EPITOPE_COLOR, opacity:1.0}}}});
-    }});
-    Object.keys(EPITOPE_BY_TYPE).forEach(function(typ) {{
-      if (!abItypeOn(typ)) return;
-      EPITOPE_BY_TYPE[typ].forEach(function(e) {{
-        var chainChk = document.getElementById("ab-cc-" + e.chain);
-        if (chainChk && !chainChk.checked) return;
-        viewer.addStyle({{chain:e.chain, resi:e.resi}},
-                        {{stick:{{radius:0.22, colorscheme:"default"}}}});
-      }});
+      viewer.addStyle({{chain:e.chain, resi:e.resi}},
+                      {{stick:{{radius:0.22, colorscheme:"default"}}}});
     }});
 
     // CDR loops — rendered last so carbon colors always win over prior passes.
