@@ -424,7 +424,12 @@ def _render_alphafold_html(pdb_bytes: bytes,
     background:rgba(13,17,23,0.88); border-radius:8px; padding:10px 14px;
     font-size:13px; min-width:230px;
   }}
-  #controls h4 {{ margin:0 0 8px; color:#e6edf3; font-size:14px; }}
+  #controls h4 {{ margin:0; color:#e6edf3; font-size:14px; }}
+  .ctrl-header {{ display:flex; justify-content:space-between; align-items:center;
+                  margin-bottom:8px; }}
+  .ctrl-collapse {{ background:none; border:none; color:#8b949e; cursor:pointer;
+                    font-size:13px; padding:0 2px; line-height:1; }}
+  .ctrl-collapse:hover {{ color:#e6edf3; }}
   .ctrl-row {{ margin:3px 0; display:flex; align-items:center; gap:6px; cursor:pointer; }}
   .ctrl-section {{ color:#8b949e; font-size:10px; text-transform:uppercase;
                    letter-spacing:0.8px; margin:8px 0 4px; border-top:1px solid #21262d;
@@ -468,8 +473,11 @@ def _render_alphafold_html(pdb_bytes: bytes,
   <div id="viewer"></div>
 
   <div id="controls">
-    <h4>🧬 {protein_name}</h4>
-
+    <div class="ctrl-header">
+      <h4>🧬 {protein_name}</h4>
+      <button class="ctrl-collapse" onclick="toggleControls()" title="Collapse/expand" id="ctrl-toggle">▲</button>
+    </div>
+    <div id="ctrl-body">
     <div class="ctrl-section">Style</div>
     <div class="ctrl-grid">
       <label class="ctrl-row"><input type="radio" name="style" value="cartoon" checked><span>Cartoon</span></label>
@@ -477,6 +485,12 @@ def _render_alphafold_html(pdb_bytes: bytes,
       <label class="ctrl-row"><input type="radio" name="style" value="sphere"><span>Sphere</span></label>
       <label class="ctrl-row"><input type="radio" name="style" value="line"><span>Line</span></label>
       <label class="ctrl-row"><input type="radio" name="style" value="surface"><span>Surface</span></label>
+    </div>
+    <div id="surf-opacity-row" style="display:none;margin:4px 0 2px;align-items:center;gap:6px;font-size:12px;color:#8b949e;">
+      <span>Opacity</span>
+      <input type="range" id="surf-opacity" min="0" max="1" step="0.05" value="0.85"
+             style="flex:1;accent-color:#58a6ff;" oninput="updateStyle()">
+      <span id="surf-opacity-val">0.85</span>
     </div>
 
     <div class="ctrl-section">Color</div>
@@ -508,6 +522,7 @@ def _render_alphafold_html(pdb_bytes: bytes,
       <button class="ctrl-btn" onclick="screenshotDownload()" title="Download PNG">📥 Save</button>
       <button class="ctrl-btn" onclick="screenshotClipboard()" title="Copy to clipboard">📋 Copy</button>
     </div>
+    </div><!-- /ctrl-body -->
   </div>
 
   <div id="legend">
@@ -591,6 +606,14 @@ $(document).ready(function() {{
   }}
 
   var currentBg = '#0d1117';
+
+  window.toggleControls = function() {{
+    var body = document.getElementById('ctrl-body');
+    var btn = document.getElementById('ctrl-toggle');
+    var collapsed = body.style.display === 'none';
+    body.style.display = collapsed ? '' : 'none';
+    btn.textContent = collapsed ? '▲' : '▼';
+  }};
 
   window.setBg = function(color, btnId) {{
     currentBg = color;
@@ -725,13 +748,17 @@ $(document).ready(function() {{
 
     var styleVal = $('input[name="style"]:checked').val();
     var col      = getColorSpec();
+    var opacityRow = document.getElementById('surf-opacity-row');
+    opacityRow.style.display = (styleVal === 'surface') ? 'flex' : 'none';
     if      (styleVal === 'cartoon') viewer.setStyle({{}},{{cartoon:col}});
     else if (styleVal === 'stick')   viewer.setStyle({{}},{{stick:Object.assign({{radius:0.15}},col)}});
     else if (styleVal === 'sphere')  viewer.setStyle({{}},{{sphere:Object.assign({{scale:0.4}},col)}});
     else if (styleVal === 'line')    viewer.setStyle({{}},{{line:col}});
     else if (styleVal === 'surface') {{
+      var surfOpacity = parseFloat(document.getElementById('surf-opacity').value);
+      document.getElementById('surf-opacity-val').textContent = surfOpacity.toFixed(2);
       viewer.setStyle({{}},{{cartoon:{{opacity:0.25,color:'#888888'}}}});
-      var surfP = viewer.addSurface($3Dmol.SurfaceType.VDW, Object.assign({{opacity:0.85}},col));
+      var surfP = viewer.addSurface($3Dmol.SurfaceType.VDW, Object.assign({{opacity:surfOpacity}},col), {{hetflag:false}});
       Promise.resolve(surfP).then(function(id) {{
         if (myEpoch !== surfaceEpoch) {{
           viewer.removeSurface(id);  // style changed while computing — discard

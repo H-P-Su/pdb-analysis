@@ -40,6 +40,15 @@ from analyze_ligands import (
 )
 from Bio.PDB.Structure import Structure
 
+# ─── Amino acid lookup ────────────────────────────────────────────────────────
+
+_AA3TO1 = {
+    'ALA': 'A', 'ARG': 'R', 'ASN': 'N', 'ASP': 'D', 'CYS': 'C',
+    'GLN': 'Q', 'GLU': 'E', 'GLY': 'G', 'HIS': 'H', 'ILE': 'I',
+    'LEU': 'L', 'LYS': 'K', 'MET': 'M', 'PHE': 'F', 'PRO': 'P',
+    'SER': 'S', 'THR': 'T', 'TRP': 'W', 'TYR': 'Y', 'VAL': 'V',
+}
+
 # ─── Palette ──────────────────────────────────────────────────────────────────
 
 _COLORS = {
@@ -579,6 +588,27 @@ def _render_html(structure_path: Path, report: LigandReport,
         _section("Salt bridges",   _COLORS["salt_cat"]["hex"], salt_items,    "salt")
     )
 
+    # ── Sequence data ─────────────────────────────────────────────────────────
+    seq_residues: list[dict] = []
+    seen_seq_keys: set[tuple] = set()
+    for model in structure:
+        for chain in model:
+            for residue in chain:
+                if residue.get_id()[0] != ' ':  # skip HETATM and water
+                    continue
+                resn  = residue.get_resname().strip()
+                if resn not in _AA3TO1:
+                    continue
+                resi  = residue.get_id()[1]
+                cid   = chain.get_id()
+                key   = (cid, resi)
+                if key not in seen_seq_keys:
+                    seen_seq_keys.add(key)
+                    seq_residues.append({"resi": resi, "resn": resn,
+                                         "aa": _AA3TO1[resn], "chain": cid})
+        break  # first model only
+    seq_js = json.dumps(seq_residues)
+
     # ── Header subtitle ───────────────────────────────────────────────────────
     subtitle = (f"{report.ligand_resn} {report.ligand_chain}:{report.ligand_resi}"
                 f" &nbsp;·&nbsp; {report.n_contacts} contacts"
@@ -642,12 +672,28 @@ body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 .role-pos {{ color: #4488ff; }}
 .role-neg {{ color: #ff4444; }}
 .empty {{ font-size: 12px; color: #aaa; font-style: italic; }}
+#vi-seq-panel {{
+  background:#1c2128; border-bottom:1px solid #30363d;
+  padding:6px 12px; white-space:pre-wrap; word-break:break-all;
+  font-family:monospace; font-size:12px; line-height:1.7; user-select:none;
+  flex-shrink:0; max-height:90px; overflow-y:auto;
+}}
+.vi-seq-aa {{ cursor:pointer; padding:0 1px; border-radius:2px; transition:background 0.1s; color:#cdd3de; }}
+.vi-seq-aa:hover {{ background:#30363d; }}
+.vi-seq-sep {{ color:#8b949e; cursor:default; }}
+.vi-seq-chain-lbl {{ color:#8b949e; font-size:10px; font-family:sans-serif; font-weight:600;
+                    cursor:default; letter-spacing:0.5px; }}
 #vi-controls {{
   position:absolute; top:10px; left:10px; z-index:100;
   background:rgba(13,17,23,0.88); border-radius:8px; padding:10px 14px;
   font-size:13px; min-width:220px; color:#cdd3de;
 }}
-#vi-controls h4 {{ margin:0 0 8px; color:#e6edf3; font-size:13px; }}
+#vi-controls h4 {{ margin:0; color:#e6edf3; font-size:13px; }}
+.vi-ctrl-header {{ display:flex; justify-content:space-between; align-items:center;
+                  margin-bottom:8px; }}
+.vi-collapse {{ background:none; border:none; color:#8b949e; cursor:pointer;
+               font-size:13px; padding:0 2px; line-height:1; }}
+.vi-collapse:hover {{ color:#e6edf3; }}
 .vi-section {{ color:#8b949e; font-size:10px; text-transform:uppercase;
               letter-spacing:0.8px; margin:8px 0 4px; border-top:1px solid #21262d;
               padding-top:6px; }}
@@ -670,11 +716,15 @@ body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   <h2>Interaction Viewer</h2>
   <div class="subtitle">{subtitle}</div>
 </div>
+<div id="vi-seq-panel"><span id="vi-seq-letters"></span></div>
 <div class="body">
   <div id="viewer-wrap"><div id="viewer"></div>
 <div id="vi-controls">
-  <h4>🔬 Viewer Controls</h4>
-
+  <div class="vi-ctrl-header">
+    <h4>🔬 Viewer Controls</h4>
+    <button class="vi-collapse" onclick="viToggleControls()" title="Collapse/expand" id="vi-toggle">▲</button>
+  </div>
+  <div id="vi-ctrl-body">
   <div class="vi-section">Style</div>
   <div class="vi-grid">
     <label class="vi-row"><input type="radio" name="vi-style" value="cartoon" checked><span>Cartoon</span></label>
@@ -682,6 +732,12 @@ body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     <label class="vi-row"><input type="radio" name="vi-style" value="sphere"><span>Sphere</span></label>
     <label class="vi-row"><input type="radio" name="vi-style" value="line"><span>Line</span></label>
     <label class="vi-row"><input type="radio" name="vi-style" value="surface"><span>Surface</span></label>
+  </div>
+  <div id="vi-surf-opacity-row" style="display:none;margin:4px 0 2px;align-items:center;gap:6px;font-size:12px;color:#8b949e;">
+    <span>Opacity</span>
+    <input type="range" id="vi-surf-opacity" min="0" max="1" step="0.05" value="0.85"
+           style="flex:1;accent-color:#58a6ff;" oninput="updateScene()">
+    <span id="vi-surf-opacity-val">0.85</span>
   </div>
 
   <div class="vi-section">Color</div>
@@ -709,6 +765,7 @@ body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     <button class="vi-btn" onclick="viSave()" title="Download PNG">📥 Save</button>
     <button class="vi-btn" onclick="viCopy()" title="Copy to clipboard">📋 Copy</button>
   </div>
+  </div><!-- /vi-ctrl-body -->
 </div>
 <div id="vi-toast">✓ Copied to clipboard</div>
 </div>
@@ -777,8 +834,54 @@ var labelSpecs = {{
 var viCurrentSurface = null;
 var viSurfaceEpoch   = 0;
 var viCurrentBg      = 'white';
+var viSeqData        = {seq_js};
+var viSelectedResi   = null;
+var viSelectedChain  = null;
+
+var VI_INT_COLORS = {{
+  contacts: '{_COLORS["contact"]["hex"]}',
+  hbonds:   '{_COLORS["hbond"]["hex"]}',
+  pi:       '{_COLORS["pi"]["hex"]}',
+  salt:     '{_COLORS["salt_cat"]["hex"]}'
+}};
 
 var viewer;
+
+function viColorSeq() {{
+  // Pre-compute all interaction types for each residue key "chain:resi"
+  var residueTypes = {{}};
+  var ALL_TYPES = ['contacts','pi','salt','hbonds'];
+  ALL_TYPES.forEach(function(t) {{
+    atomStyles[t].forEach(function(item) {{
+      var key = item.sel.chain + ':' + item.sel.resi;
+      if (!residueTypes[key]) residueTypes[key] = [];
+      residueTypes[key].push(t);
+    }});
+  }});
+
+  // Priority order (increasing — hbonds wins over salt wins over pi wins over contacts)
+  var priority = ['contacts','pi','salt','hbonds'];
+
+  document.querySelectorAll('.vi-seq-aa').forEach(function(el) {{
+    var key = el.dataset.chain + ':' + el.dataset.resi;
+    var resi = parseInt(el.dataset.resi);
+    if (resi === viSelectedResi && el.dataset.chain === viSelectedChain) {{
+      el.style.background = '#4488ff'; el.style.color = 'white'; return;
+    }}
+    var types = residueTypes[key] || [];
+    var color = null;
+    priority.forEach(function(t) {{
+      var chk = document.getElementById('tog-' + t);
+      if (chk && chk.checked && types.indexOf(t) >= 0) color = VI_INT_COLORS[t];
+    }});
+    if (color) {{
+      el.style.background = color + '33';
+      el.style.color = color;
+    }} else {{
+      el.style.background = ''; el.style.color = '';
+    }}
+  }});
+}}
 
 function viGetColorSpec() {{
   var s = document.querySelector('input[name="vi-color"]:checked').value;
@@ -787,6 +890,14 @@ function viGetColorSpec() {{
   if (s === 'ss')        return {{colorscheme: 'ssJmol'}};
   if (s === 'chain')     return {{colorscheme: 'chainHetatm'}};
   return {{color: '#b8b8b8', opacity: 0.75}};
+}}
+
+function viToggleControls() {{
+  var body = document.getElementById('vi-ctrl-body');
+  var btn = document.getElementById('vi-toggle');
+  var collapsed = body.style.display === 'none';
+  body.style.display = collapsed ? '' : 'none';
+  btn.textContent = collapsed ? '▲' : '▼';
 }}
 
 function viBg(color, btnId) {{
@@ -862,6 +973,8 @@ function updateScene() {{
 
   var viStyleVal = document.querySelector('input[name="vi-style"]:checked').value;
   var viCol = viGetColorSpec();
+  var viOpacityRow = document.getElementById('vi-surf-opacity-row');
+  viOpacityRow.style.display = (viStyleVal === 'surface') ? 'flex' : 'none';
 
   viewer.setStyle({{}}, {{}});
   viewer.setStyle({{resn: WATER_NAMES}}, {{}});
@@ -875,8 +988,10 @@ function updateScene() {{
   }} else if (viStyleVal === 'line') {{
     viewer.setStyle({{}}, {{line: viCol}});
   }} else if (viStyleVal === 'surface') {{
+    var viSurfOpacity = parseFloat(document.getElementById('vi-surf-opacity').value);
+    document.getElementById('vi-surf-opacity-val').textContent = viSurfOpacity.toFixed(2);
     viewer.setStyle({{}}, {{cartoon: {{opacity: 0.2, color: '#888888'}}}});
-    var surfP = viewer.addSurface($3Dmol.SurfaceType.VDW, Object.assign({{opacity: 0.85}}, viCol));
+    var surfP = viewer.addSurface($3Dmol.SurfaceType.VDW, Object.assign({{opacity: viSurfOpacity}}, viCol), {{hetflag: false}});
     Promise.resolve(surfP).then(function(id) {{
       if (myEpoch !== viSurfaceEpoch) {{
         viewer.removeSurface(id);
@@ -928,6 +1043,9 @@ function updateScene() {{
     if (el) el.style.display =
       document.getElementById("tog-"+t).checked ? "" : "none";
   }});
+
+  // 7. Sequence coloring
+  viColorSeq();
 }}
 
 function setAll(on) {{
@@ -936,6 +1054,41 @@ function setAll(on) {{
   }});
   updateScene();
 }}
+
+// ── Build sequence strip ────────────────────────────────────────────────────
+(function() {{
+  var multiChain = viSeqData.length > 1 && viSeqData.some(function(r) {{
+    return r.chain !== viSeqData[0].chain;
+  }});
+  var html = '';
+  var prevChain = null;
+  var chainPos  = 0;
+  viSeqData.forEach(function(r) {{
+    if (r.chain !== prevChain) {{
+      if (prevChain !== null) html += '<br>';
+      if (multiChain) html += '<span class="vi-seq-chain-lbl">Chain ' + r.chain + '</span><br>';
+      prevChain = r.chain;
+      chainPos  = 0;
+    }}
+    html += '<span class="vi-seq-aa" data-resi="' + r.resi + '" data-chain="' + r.chain
+          + '" title="' + r.resn + ' ' + r.resi + '">' + r.aa + '</span>';
+    chainPos++;
+    if      (chainPos % 100 === 0) html += '<br>';
+    else if (chainPos % 50  === 0) html += '<span class="vi-seq-sep">  </span>';
+    else if (chainPos % 10  === 0) html += '<span class="vi-seq-sep"> </span>';
+  }});
+  document.getElementById('vi-seq-letters').innerHTML = html;
+}})();
+
+document.addEventListener('click', function(e) {{
+  var el = e.target.closest('.vi-seq-aa');
+  if (!el || !viewer) return;
+  viSelectedResi  = parseInt(el.dataset.resi);
+  viSelectedChain = el.dataset.chain;
+  viColorSeq();
+  viewer.center({{resi: viSelectedResi, chain: viSelectedChain}}, 500, false);
+  viewer.render();
+}});
 
 window.addEventListener("DOMContentLoaded", function() {{
   viewer = $3Dmol.createViewer(document.getElementById("viewer"),
