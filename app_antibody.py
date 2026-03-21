@@ -519,15 +519,19 @@ def _render_antibody_html(pdb_bytes: bytes, ab_data: dict,
                                  "c": cdr_lbl, "e": pdb_resi in ep_resis})
         seq_rows.append({"id": cid, "type": ctype, "residues": residues_js})
 
-    # ── Antibody-side contact residues (paratope, per chain) ──────────────────
-    ab_contact_set: dict[str, set] = {}   # chain_id → set of pdb resi ints
-    for c in pe:
-        ab_contact_set.setdefault(c["Ab chain"], set()).add(c["Ab resi"])
-    ab_contact_entries: list[dict] = []
-    for cid, resi_set in ab_contact_set.items():
-        if resi_set:
-            resi_str = ",".join(str(r) for r in sorted(resi_set))
-            ab_contact_entries.append({"chain": cid, "resi": resi_str})
+    # ── Per-type contact residues (for interaction-type toggles) ──────────────
+    def _by_type(chain_key: str, resi_key: str) -> dict:
+        """Group contact resi sets by interaction type → {type: [{chain,resi}]}."""
+        acc: dict[str, dict[str, set]] = {}
+        for c in pe:
+            acc.setdefault(c["Interaction"], {}).setdefault(c[chain_key], set()).add(c[resi_key])
+        return {
+            itype: [{"chain": cid, "resi": ",".join(str(r) for r in sorted(rs))}
+                    for cid, rs in chain_map.items()]
+            for itype, chain_map in acc.items()
+        }
+    ab_contact_by_type = _by_type("Ab chain", "Ab resi")
+    epitope_by_type    = _by_type("Ag chain", "Ag resi")
 
     # ── Interaction lines for 3D viewer ────────────────────────────────────────
     interaction_lines: list[dict] = [
@@ -543,11 +547,12 @@ def _render_antibody_html(pdb_bytes: bytes, ab_data: dict,
     ]
 
     # ── JS data blobs ──────────────────────────────────────────────────────────
-    cdr_entries_js        = json.dumps(cdr_entries)
-    epitope_entries_js    = json.dumps(epitope_entries)
-    ab_contact_entries_js = json.dumps(ab_contact_entries)
-    interaction_lines_js  = json.dumps(interaction_lines)
-    itype_colors_js       = json.dumps(_ITYPE_COLORS)
+    cdr_entries_js           = json.dumps(cdr_entries)
+    epitope_entries_js       = json.dumps(epitope_entries)
+    ab_contact_by_type_js    = json.dumps(ab_contact_by_type)
+    epitope_by_type_js       = json.dumps(epitope_by_type)
+    interaction_lines_js     = json.dumps(interaction_lines)
+    itype_colors_js          = json.dumps(_ITYPE_COLORS)
     chain_types_js        = json.dumps(chain_types)
     default_on_js         = json.dumps(default_on)
     all_chain_ids_js      = json.dumps(all_chain_ids)
@@ -671,14 +676,15 @@ label.ab-chk input {{ cursor:pointer; }}
 <script>
 $(function() {{
   // ── Data ─────────────────────────────────────────────────────────────────
-  var ALL_CHAINS      = {all_chain_ids_js};
-  var CHAIN_TYPES     = {chain_types_js};
-  var DEFAULT_ON      = {default_on_js};
-  var CDR_DATA        = {cdr_entries_js};
-  var EPITOPE_DATA    = {epitope_entries_js};
-  var AB_CONTACT_DATA = {ab_contact_entries_js};
-  var ILINES          = {interaction_lines_js};
-  var ITYPE_COLORS    = {itype_colors_js};
+  var ALL_CHAINS           = {all_chain_ids_js};
+  var CHAIN_TYPES          = {chain_types_js};
+  var DEFAULT_ON           = {default_on_js};
+  var CDR_DATA             = {cdr_entries_js};
+  var EPITOPE_DATA         = {epitope_entries_js};
+  var AB_CONTACT_BY_TYPE   = {ab_contact_by_type_js};
+  var EPITOPE_BY_TYPE      = {epitope_by_type_js};
+  var ILINES               = {interaction_lines_js};
+  var ITYPE_COLORS         = {itype_colors_js};
   var SEQ_ROWS        = {seq_rows_js};
   var CDR_COLORS      = {cdr_colors_js};
   var CHAIN_COLORS    = {chain_colors_js};
@@ -758,7 +764,7 @@ $(function() {{
       var ctype   = CHAIN_TYPES[cid] || "Unknown";
       var col     = CHAIN_COLORS[ctype] || "#888888";
       var isPrim  = DEFAULT_ON[cid];
-      var opacity = (ctype === "Antigen") ? 0.30 : 0.50;
+      var opacity = 0.25;
 
       if (style === "cartoon") {{
         viewer.setStyle({{chain:cid}}, {{cartoon:{{color:col, opacity:opacity}}}});
@@ -768,23 +774,39 @@ $(function() {{
       }}
     }});
 
-    // Antibody contact residues (paratope side — CDR or not); rendered first
-    // so CDR pass below can override carbon colors for CDR residues.
-    AB_CONTACT_DATA.forEach(function(e) {{
-      var chainChk = document.getElementById("ab-cc-" + e.chain);
-      if (chainChk && !chainChk.checked) return;
-      viewer.addStyle({{chain:e.chain, resi:e.resi}},
-                      {{stick:{{radius:0.22, colorscheme:"default"}}}});
+    // Helper: is an interaction type currently enabled?
+    function abItypeOn(typ) {{
+      var chk = document.getElementById("ab-itype-" + typ.replace(/ /g,"-"));
+      return !chk || chk.checked;
+    }}
+
+    // Antibody contact sticks — per active interaction type, rendered first
+    // so CDR pass can override carbon colors for CDR contact residues.
+    Object.keys(AB_CONTACT_BY_TYPE).forEach(function(typ) {{
+      if (!abItypeOn(typ)) return;
+      AB_CONTACT_BY_TYPE[typ].forEach(function(e) {{
+        var chainChk = document.getElementById("ab-cc-" + e.chain);
+        if (chainChk && !chainChk.checked) return;
+        viewer.addStyle({{chain:e.chain, resi:e.resi}},
+                        {{stick:{{radius:0.22, colorscheme:"default"}}}});
+      }});
     }});
 
-    // Epitope residues (antigen side contacts); rendered before CDR pass.
+    // Epitope residues — cartoon always shown; sticks only for active types.
     EPITOPE_DATA.forEach(function(e) {{
       var chainChk = document.getElementById("ab-cc-" + e.chain);
       if (chainChk && !chainChk.checked) return;
       viewer.setStyle({{chain:e.chain, resi:e.resi}},
                       {{cartoon:{{color:EPITOPE_COLOR, opacity:1.0}}}});
-      viewer.addStyle({{chain:e.chain, resi:e.resi}},
-                      {{stick:{{radius:0.22, colorscheme:"default"}}}});
+    }});
+    Object.keys(EPITOPE_BY_TYPE).forEach(function(typ) {{
+      if (!abItypeOn(typ)) return;
+      EPITOPE_BY_TYPE[typ].forEach(function(e) {{
+        var chainChk = document.getElementById("ab-cc-" + e.chain);
+        if (chainChk && !chainChk.checked) return;
+        viewer.addStyle({{chain:e.chain, resi:e.resi}},
+                        {{stick:{{radius:0.22, colorscheme:"default"}}}});
+      }});
     }});
 
     // CDR loops — rendered last so carbon colors always win over prior passes.
