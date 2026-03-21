@@ -639,8 +639,8 @@ label.ab-chk input {{ cursor:pointer; }}
     <div style="display:flex; align-items:center; gap:6px; margin-top:4px;">
       <span style="font-size:11px; white-space:nowrap">Framework opacity</span>
       <input type="range" id="ab-fw-opacity" min="0.0" max="1.0" step="0.05" value="0.75"
-             style="width:90px" oninput="document.getElementById('ab-fw-val').textContent=Math.round((1-parseFloat(this.value))*100)+'%';abRender()">
-      <span id="ab-fw-val" style="font-size:11px;width:28px">25%</span>
+             style="width:90px" oninput="document.getElementById('ab-fw-val').textContent=Math.round(parseFloat(this.value)*100)+'%';abRender()">
+      <span id="ab-fw-val" style="font-size:11px;width:28px">75%</span>
     </div>
     <div id="ab-surf-row">
       <span style="font-size:11px">Surface opacity</span>
@@ -754,7 +754,7 @@ $(function() {{
   window.abRender = function() {{
     var style      = document.querySelector('input[name="ab-style"]:checked').value;
     var surfOpacity = parseFloat(document.getElementById("ab-surf-opacity").value);
-    var fwOpacity   = 1.0 - parseFloat(document.getElementById("ab-fw-opacity").value);
+    var fwOpacity   = parseFloat(document.getElementById("ab-fw-opacity").value);
     document.getElementById("ab-surf-row").style.display =
       style === "surface" ? "flex" : "none";
 
