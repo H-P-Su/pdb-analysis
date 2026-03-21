@@ -68,8 +68,8 @@ _AA3TO1 = {
 
 # ── Color palettes ─────────────────────────────────────────────────────────────
 _CHAIN_COLORS = {
-    "VH": "#4e79a7",
-    "VL": "#f28e2b",
+    "VH": "#1e3a8a",   # dark blue
+    "VL": "#00bcd4",   # cyan
     "Antigen": "#e15759",
     "Unknown": "#888888",
 }
@@ -321,26 +321,38 @@ def _run_antibody_analysis(data: bytes) -> dict:
                 )
                 for cid in ab_ids
             }
-            ns   = NeighborSearch(ab_atoms + ag_atoms)
-            seen = set()
+            ns            = NeighborSearch(ab_atoms + ag_atoms)
+            atom_pair_map: dict = {}   # key → [(ag_atom, ab_atom, dist), …]
             for atom in ag_atoms:
-                for n_atom in ns.search(atom.coord, 4.5):
+                for n_atom in ns.search(atom.coord, 5.0):
                     n_res      = n_atom.get_parent()
                     n_chain_id = n_res.get_parent().id
                     if n_chain_id in ab_ids:
-                        ag_res   = atom.get_parent()
-                        ag_cid   = ag_res.get_parent().id
-                        key      = (ag_cid, ag_res.get_id()[1], n_chain_id, n_res.get_id()[1])
-                        if key not in seen:
-                            seen.add(key)
-                            in_cdr = n_res.get_id()[1] in cdr_resi_map.get(n_chain_id, set())
-                            paratope_contacts.append({
-                                "Ag chain": ag_cid, "Ag resi": ag_res.get_id()[1], "Ag resn": ag_res.get_resname(),
-                                "Ab chain": n_chain_id, "Ab type": chain_info[n_chain_id]["type"],
-                                "Ab resi": n_res.get_id()[1], "Ab resn": n_res.get_resname(),
-                                "In CDR": "✓" if in_cdr else "",
-                                "dist (Å)": round(float(atom - n_atom), 2),
-                            })
+                        ag_res = atom.get_parent()
+                        ag_cid = ag_res.get_parent().id
+                        key    = (ag_cid, ag_res.get_id()[1], n_chain_id, n_res.get_id()[1])
+                        atom_pair_map.setdefault(key, []).append(
+                            (atom, n_atom, float(atom - n_atom))
+                        )
+            for key, pairs in atom_pair_map.items():
+                pairs.sort(key=lambda x: x[2])
+                ag_cid, ag_resi, ab_cid, ab_resi = key
+                ag_res = pairs[0][0].get_parent()
+                ab_res = pairs[0][1].get_parent()
+                in_cdr = ab_resi in cdr_resi_map.get(ab_cid, set())
+                itype  = _classify_interaction(
+                    ag_res.get_resname(), ab_res.get_resname(), pairs
+                )
+                paratope_contacts.append({
+                    "Ag chain": ag_cid, "Ag resi": ag_resi, "Ag resn": ag_res.get_resname(),
+                    "Ab chain": ab_cid, "Ab type": chain_info[ab_cid]["type"],
+                    "Ab resi":  ab_resi, "Ab resn": ab_res.get_resname(),
+                    "In CDR":   "✓" if in_cdr else "",
+                    "Interaction": itype,
+                    "dist (Å)": round(pairs[0][2], 2),
+                    "_ag_coord": [round(float(c), 3) for c in pairs[0][0].coord],
+                    "_ab_coord": [round(float(c), 3) for c in pairs[0][1].coord],
+                })
             paratope_contacts.sort(key=lambda x: x["dist (Å)"])
 
         return {
@@ -384,6 +396,46 @@ def _png_2d(pdb_path, report, structure):
 
 
 # ── CDR + Interface 3D Viewer ──────────────────────────────────────────────────
+
+# ── Interaction-type constants ─────────────────────────────────────────────────
+_CHARGED_POS  = {"LYS": {"NZ"}, "ARG": {"NH1","NH2","NE"}, "HIS": {"ND1","NE2"}}
+_CHARGED_NEG  = {"ASP": {"OD1","OD2"}, "GLU": {"OE1","OE2"}}
+_HBOND_N      = {"N","NZ","NH1","NH2","NE","ND1","NE2","ND2","NE1","OG","OG1","OH"}
+_HBOND_O      = {"O","OD1","OD2","OE1","OE2","OG","OG1","OH","OXT","ND1","NE2"}
+_HYDROPHOBIC_RES = {"ALA","VAL","ILE","LEU","MET","PHE","TRP","PRO","CYS"}
+_ITYPE_COLORS = {
+    "H-bond":      "#ffdd00",   # yellow
+    "Salt bridge": "#ff66cc",   # pink
+    "Hydrophobic": "#66ff66",   # green
+    "VdW":         "#aaaaaa",   # grey
+}
+
+
+def _classify_interaction(ag_resname: str, ab_resname: str, atom_pairs: list) -> str:
+    """Classify the dominant interaction between two residues from sorted atom pairs."""
+    # Salt bridge: charged atom pairs ≤ 4.5 Å
+    for ag_at, ab_at, dist in atom_pairs:
+        if dist > 4.5: break
+        ag_an = ag_at.get_name().strip()
+        ab_an = ab_at.get_name().strip()
+        if ((ag_an in _CHARGED_POS.get(ag_resname, set()) and ab_an in _CHARGED_NEG.get(ab_resname, set())) or
+            (ag_an in _CHARGED_NEG.get(ag_resname, set()) and ab_an in _CHARGED_POS.get(ab_resname, set()))):
+            return "Salt bridge"
+    # H-bond: N…O or O…N ≤ 3.5 Å
+    for ag_at, ab_at, dist in atom_pairs:
+        if dist > 3.5: break
+        ag_an = ag_at.get_name().strip()
+        ab_an = ab_at.get_name().strip()
+        if (ag_an in _HBOND_N and ab_an in _HBOND_O) or (ag_an in _HBOND_O and ab_an in _HBOND_N):
+            return "H-bond"
+    # Hydrophobic: C…C ≤ 4.5 Å, at least one hydrophobic residue
+    if ag_resname in _HYDROPHOBIC_RES or ab_resname in _HYDROPHOBIC_RES:
+        for ag_at, ab_at, dist in atom_pairs:
+            if dist > 4.5: break
+            if ag_at.get_name().strip().startswith("C") and ab_at.get_name().strip().startswith("C"):
+                return "Hydrophobic"
+    return "VdW"
+
 
 _EPITOPE_COLOR = "#00ccff"   # cyan  — antigen epitope residues
 
@@ -438,7 +490,7 @@ def _render_antibody_html(pdb_bytes: bytes, ab_data: dict,
     for c in pe:
         epitope_resi_set.setdefault(c["Ag chain"], set()).add(c["Ag resi"])
     epitope_entries = [
-        {"chain": cid, "resi": f"{min(rs)}-{max(rs)}"}
+        {"chain": cid, "resi": ",".join(str(r) for r in sorted(rs))}
         for cid, rs in epitope_resi_set.items()
     ]
 
@@ -467,18 +519,44 @@ def _render_antibody_html(pdb_bytes: bytes, ab_data: dict,
                                  "c": cdr_lbl, "e": pdb_resi in ep_resis})
         seq_rows.append({"id": cid, "type": ctype, "residues": residues_js})
 
+    # ── Antibody-side contact residues (paratope, per chain) ──────────────────
+    ab_contact_set: dict[str, set] = {}   # chain_id → set of pdb resi ints
+    for c in pe:
+        ab_contact_set.setdefault(c["Ab chain"], set()).add(c["Ab resi"])
+    ab_contact_entries: list[dict] = []
+    for cid, resi_set in ab_contact_set.items():
+        if resi_set:
+            resi_str = ",".join(str(r) for r in sorted(resi_set))
+            ab_contact_entries.append({"chain": cid, "resi": resi_str})
+
+    # ── Interaction lines for 3D viewer ────────────────────────────────────────
+    interaction_lines: list[dict] = [
+        {
+            "ag_chain":  c["Ag chain"], "ag_resi": c["Ag resi"],
+            "ab_chain":  c["Ab chain"], "ab_resi": c["Ab resi"],
+            "type":      c["Interaction"],
+            "color":     _ITYPE_COLORS.get(c["Interaction"], "#aaaaaa"),
+            "ag_coord":  c["_ag_coord"],
+            "ab_coord":  c["_ab_coord"],
+        }
+        for c in pe if "_ag_coord" in c
+    ]
+
     # ── JS data blobs ──────────────────────────────────────────────────────────
-    cdr_entries_js     = json.dumps(cdr_entries)
-    epitope_entries_js = json.dumps(epitope_entries)
-    chain_types_js     = json.dumps(chain_types)
-    default_on_js      = json.dumps(default_on)
-    all_chain_ids_js   = json.dumps(all_chain_ids)
-    seq_rows_js        = json.dumps(seq_rows)
-    cdr_colors_js      = json.dumps(_CDR_COLORS)
-    chain_colors_js    = json.dumps(_CHAIN_COLORS)
-    zoom_chain_js      = json.dumps(zoom_chain)
-    zoom_resi_js       = json.dumps(zoom_resi)
-    epitope_color_js   = json.dumps(_EPITOPE_COLOR)
+    cdr_entries_js        = json.dumps(cdr_entries)
+    epitope_entries_js    = json.dumps(epitope_entries)
+    ab_contact_entries_js = json.dumps(ab_contact_entries)
+    interaction_lines_js  = json.dumps(interaction_lines)
+    itype_colors_js       = json.dumps(_ITYPE_COLORS)
+    chain_types_js        = json.dumps(chain_types)
+    default_on_js         = json.dumps(default_on)
+    all_chain_ids_js      = json.dumps(all_chain_ids)
+    seq_rows_js           = json.dumps(seq_rows)
+    cdr_colors_js         = json.dumps(_CDR_COLORS)
+    chain_colors_js       = json.dumps(_CHAIN_COLORS)
+    zoom_chain_js         = json.dumps(zoom_chain)
+    zoom_resi_js          = json.dumps(zoom_resi)
+    epitope_color_js      = json.dumps(_EPITOPE_COLOR)
 
     pdb_escaped = pdb_str.replace("\\", "\\\\").replace("`", "\\`")
 
@@ -566,6 +644,21 @@ label.ab-chk input {{ cursor:pointer; }}
     <div class="ab-ctrl-row" id="ab-cdr-checks"></div>
   </div>
 
+  <div class="ab-ctrl-section">
+    <b>Interactions</b>
+    <div class="ab-ctrl-row" id="ab-itype-checks"></div>
+  </div>
+
+  <div class="ab-ctrl-section">
+    <b>Background</b>
+    <div class="ab-ctrl-row">
+      <label class="ab-chk"><input type="radio" name="ab-bg" value="0x1a1a2e" checked onchange="abChangeBg(this.value)"> Dark</label>
+      <label class="ab-chk"><input type="radio" name="ab-bg" value="0x000000" onchange="abChangeBg(this.value)"> Black</label>
+      <label class="ab-chk"><input type="radio" name="ab-bg" value="0xffffff" onchange="abChangeBg(this.value)"> White</label>
+      <label class="ab-chk"><input type="radio" name="ab-bg" value="0x888888" onchange="abChangeBg(this.value)"> Grey</label>
+    </div>
+  </div>
+
 </div><!-- end ctrl-body -->
 
 <!-- Sequence panel -->
@@ -578,19 +671,23 @@ label.ab-chk input {{ cursor:pointer; }}
 <script>
 $(function() {{
   // ── Data ─────────────────────────────────────────────────────────────────
-  var ALL_CHAINS    = {all_chain_ids_js};
-  var CHAIN_TYPES   = {chain_types_js};
-  var DEFAULT_ON    = {default_on_js};
-  var CDR_DATA      = {cdr_entries_js};
-  var EPITOPE_DATA  = {epitope_entries_js};
-  var SEQ_ROWS      = {seq_rows_js};
-  var CDR_COLORS    = {cdr_colors_js};
-  var CHAIN_COLORS  = {chain_colors_js};
-  var EPITOPE_COLOR = {epitope_color_js};
-  var ZOOM_CHAIN    = {zoom_chain_js};
-  var ZOOM_RESI     = {zoom_resi_js};
+  var ALL_CHAINS      = {all_chain_ids_js};
+  var CHAIN_TYPES     = {chain_types_js};
+  var DEFAULT_ON      = {default_on_js};
+  var CDR_DATA        = {cdr_entries_js};
+  var EPITOPE_DATA    = {epitope_entries_js};
+  var AB_CONTACT_DATA = {ab_contact_entries_js};
+  var ILINES          = {interaction_lines_js};
+  var ITYPE_COLORS    = {itype_colors_js};
+  var SEQ_ROWS        = {seq_rows_js};
+  var CDR_COLORS      = {cdr_colors_js};
+  var CHAIN_COLORS    = {chain_colors_js};
+  var EPITOPE_COLOR   = {epitope_color_js};
+  var ZOOM_CHAIN      = {zoom_chain_js};
+  var ZOOM_RESI       = {zoom_resi_js};
 
-  var surfObj = null;   // current surface object
+  var surfObj   = null;   // current surface object
+  var ilineObjs = [];     // current interaction line shapes
 
   // ── Viewer init ───────────────────────────────────────────────────────────
   var viewer = $3Dmol.createViewer($("#ab-viewer"), {{backgroundColor:"0x1a1a2e"}});
@@ -623,6 +720,18 @@ $(function() {{
     cdrChecks.appendChild(el);
   }});
 
+  // ── Build interaction-type checkboxes ─────────────────────────────────────
+  var itypeChecks = document.getElementById("ab-itype-checks");
+  Object.keys(ITYPE_COLORS).forEach(function(typ) {{
+    var col = ITYPE_COLORS[typ];
+    var id  = "ab-itype-" + typ.replace(/ /g,"-");
+    var el  = document.createElement("label");
+    el.className = "ab-chk";
+    el.innerHTML = '<input type="checkbox" id="' + id + '" checked onchange="abRender()">'
+                 + '<span style="color:' + col + '">■ ' + typ + '</span>';
+    itypeChecks.appendChild(el);
+  }});
+
   // ── Surface opacity live label ────────────────────────────────────────────
   document.getElementById("ab-surf-opacity").addEventListener("input", function() {{
     document.getElementById("ab-surf-val").textContent =
@@ -649,7 +758,7 @@ $(function() {{
       var ctype   = CHAIN_TYPES[cid] || "Unknown";
       var col     = CHAIN_COLORS[ctype] || "#888888";
       var isPrim  = DEFAULT_ON[cid];
-      var opacity = (ctype === "Antigen") ? 0.30 : 0.40;
+      var opacity = (ctype === "Antigen") ? 0.30 : 0.50;
 
       if (style === "cartoon") {{
         viewer.setStyle({{chain:cid}}, {{cartoon:{{color:col, opacity:opacity}}}});
@@ -659,19 +768,16 @@ $(function() {{
       }}
     }});
 
-    // CDR loops
-    CDR_DATA.forEach(function(e) {{
+    // Antibody contact residues (paratope side — CDR or not); rendered first
+    // so CDR pass below can override carbon colors for CDR residues.
+    AB_CONTACT_DATA.forEach(function(e) {{
       var chainChk = document.getElementById("ab-cc-" + e.chain);
-      var cdrChk   = document.getElementById("ab-cdr-" + e.label.replace(/-/g,""));
       if (chainChk && !chainChk.checked) return;
-      if (cdrChk && !cdrChk.checked) return;
-      viewer.setStyle({{chain:e.chain, resi:e.resi}},
-                      {{cartoon:{{color:e.color, opacity:1.0}}}});
       viewer.addStyle({{chain:e.chain, resi:e.resi}},
                       {{stick:{{radius:0.22, colorscheme:"default"}}}});
     }});
 
-    // Epitope residues
+    // Epitope residues (antigen side contacts); rendered before CDR pass.
     EPITOPE_DATA.forEach(function(e) {{
       var chainChk = document.getElementById("ab-cc-" + e.chain);
       if (chainChk && !chainChk.checked) return;
@@ -681,16 +787,49 @@ $(function() {{
                       {{stick:{{radius:0.22, colorscheme:"default"}}}});
     }});
 
+    // CDR loops — rendered last so carbon colors always win over prior passes.
+    CDR_DATA.forEach(function(e) {{
+      var chainChk = document.getElementById("ab-cc-" + e.chain);
+      var cdrChk   = document.getElementById("ab-cdr-" + e.label.replace(/-/g,""));
+      if (chainChk && !chainChk.checked) return;
+      if (cdrChk && !cdrChk.checked) return;
+      viewer.setStyle({{chain:e.chain, resi:e.resi}},
+                      {{cartoon:{{color:e.color, opacity:1.0}}}});
+      // All atoms CPK first, then override carbons with CDR color.
+      viewer.addStyle({{chain:e.chain, resi:e.resi}},
+                      {{stick:{{radius:0.22, colorscheme:"default"}}}});
+      viewer.addStyle({{chain:e.chain, resi:e.resi, elem:"C"}},
+                      {{stick:{{radius:0.22, color:e.color}}}});
+    }});
+
     // Surface
     if (style === "surface") {{
       var visChains = ALL_CHAINS.filter(function(c) {{
         var chk = document.getElementById("ab-cc-" + c); return chk && chk.checked;
       }});
       if (visChains.length > 0) {{
-        surfObj = viewer.addSurface($3Dmol.SurfaceType.VDW, {{opacity:surfOpacity}},
-          {{chain: visChains}});
+        viewer.addSurface($3Dmol.SurfaceType.VDW, {{opacity:surfOpacity}},
+          {{chain: visChains}}).then(function(id) {{ surfObj = id; }});
       }}
     }}
+
+    // Interaction lines — remove old, draw new
+    ilineObjs.forEach(function(s) {{ viewer.removeShape(s); }});
+    ilineObjs = [];
+    ILINES.forEach(function(il) {{
+      var typId  = "ab-itype-" + il.type.replace(/ /g,"-");
+      var typChk = document.getElementById(typId);
+      if (typChk && !typChk.checked) return;
+      var chkAg  = document.getElementById("ab-cc-" + il.ag_chain);
+      var chkAb  = document.getElementById("ab-cc-" + il.ab_chain);
+      if ((chkAg && !chkAg.checked) || (chkAb && !chkAb.checked)) return;
+      var s = viewer.addCylinder({{
+        start: {{x:il.ag_coord[0], y:il.ag_coord[1], z:il.ag_coord[2]}},
+        end:   {{x:il.ab_coord[0], y:il.ab_coord[1], z:il.ab_coord[2]}},
+        radius: 0.07, color: il.color, fromCap: 0, toCap: 0,
+      }});
+      ilineObjs.push(s);
+    }});
 
     viewer.render();
     abColorSeq();
@@ -752,6 +891,12 @@ $(function() {{
         span.style.color = "#ccc";
       }}
     }});
+  }};
+
+  // ── Background color ──────────────────────────────────────────────────────
+  window.abChangeBg = function(color) {{
+    viewer.setBackgroundColor(color);
+    viewer.render();
   }};
 
   // ── Collapsible controls ──────────────────────────────────────────────────
@@ -1295,23 +1440,47 @@ with tab_ab:
                 st.subheader(f"Paratope–Epitope Contacts  (antigen: {', '.join(ag_chains)})")
                 pe = ab_data["paratope_contacts"]
                 if pe:
-                    df_pe = pd.DataFrame(pe)
-                    cdr_count = sum(1 for r in pe if r["In CDR"] == "✓")
+                    _private = {"_ag_coord", "_ab_coord"}
+                    df_pe = pd.DataFrame(
+                        [{k: v for k, v in r.items() if k not in _private} for r in pe]
+                    )
+                    cdr_count  = sum(1 for r in pe if r["In CDR"] == "✓")
+                    type_counts = {}
+                    for r in pe:
+                        type_counts[r["Interaction"]] = type_counts.get(r["Interaction"], 0) + 1
+                    badge = "  ·  ".join(
+                        f'<span style="color:{_ITYPE_COLORS[t]}">{t}: **{n}**</span>'
+                        for t, n in sorted(type_counts.items())
+                    )
                     st.caption(
-                        f"{len(pe)} unique contacts ≤ 4.5 Å  ·  "
-                        f"**{cdr_count}** in CDR residues"
+                        f"{len(pe)} contacts ≤ 5 Å  ·  **{cdr_count}** in CDR  ·  {badge}",
+                        unsafe_allow_html=True,
+                    )
+
+                    # Tabs by interaction type
+                    itype_tabs = list(type_counts.keys())
+                    tab_all, *type_tab_objs = st.tabs(
+                        ["All"] + [f"{t} ({type_counts[t]})" for t in itype_tabs]
                     )
                     dist_col = "dist (Å)"
-                    st.dataframe(
-                        df_pe.style.background_gradient(subset=[dist_col], cmap="Oranges_r"),
-                        hide_index=True,
-                    )
-                    st.download_button(
-                        "⬇ Paratope-epitope CSV", df_pe.to_csv(index=False),
-                        file_name=f"{pdb_path.stem}_paratope_epitope.csv", mime="text/csv",
-                    )
+                    with tab_all:
+                        st.dataframe(
+                            df_pe.style.background_gradient(subset=[dist_col], cmap="Oranges_r"),
+                            hide_index=True,
+                        )
+                        st.download_button(
+                            "⬇ Paratope-epitope CSV", df_pe.to_csv(index=False),
+                            file_name=f"{pdb_path.stem}_paratope_epitope.csv", mime="text/csv",
+                        )
+                    for tab_obj, itype in zip(type_tab_objs, itype_tabs):
+                        with tab_obj:
+                            df_sub = df_pe[df_pe["Interaction"] == itype]
+                            st.dataframe(
+                                df_sub.style.background_gradient(subset=[dist_col], cmap="Oranges_r"),
+                                hide_index=True,
+                            )
                 else:
-                    st.info("No antibody–antigen contacts found within 4.5 Å.")
+                    st.info("No antibody–antigen contacts found within 5 Å.")
             elif vh_chains or vl_chains:
                 st.divider()
                 st.info(
