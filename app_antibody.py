@@ -395,6 +395,223 @@ def _png_2d(pdb_path, report, structure):
     d = p.read_bytes(); p.unlink(missing_ok=True); return d
 
 
+def _ab_cdr_label_map(chain_info: dict) -> dict:
+    """Map (chain_id, resi) -> CDR label string."""
+    m: dict = {}
+    for cid, info in chain_info.items():
+        letter = "H" if info.get("type") == "VH" else "L"
+        for n in [1, 2, 3]:
+            for r in info.get(f"cdr{n}_resis", []):
+                m[(cid, r)] = f"CDR-{letter}{n}"
+    return m
+
+
+_CDR_ORDER   = ["CDR-H1", "CDR-H2", "CDR-H3", "CDR-L1", "CDR-L2", "CDR-L3", "Framework"]
+_ITYPE_PRI   = {"Salt bridge": 0, "H-bond": 1, "Hydrophobic": 2, "VdW": 3}
+
+
+def _png_ab_fingerprint(pe: list, chain_info: dict) -> bytes:
+    """Paratope interaction fingerprint: paratope residues × interaction types."""
+    import matplotlib; matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import matplotlib.patches as mpatches
+    from io import BytesIO
+    if not pe:
+        return b""
+
+    lbl_map   = _ab_cdr_label_map(chain_info)
+    itypes    = ["H-bond", "Salt bridge", "Hydrophobic", "VdW"]
+    i_colors  = {"H-bond": "#ffdd00", "Salt bridge": "#ff66cc",
+                 "Hydrophobic": "#66ff66", "VdW": "#aaaaaa"}
+    cdr_cols  = {"CDR-H1": "#ff4444", "CDR-H2": "#ff8800", "CDR-H3": "#ffee00",
+                 "CDR-L1": "#44cc44", "CDR-L2": "#4488ff", "CDR-L3": "#cc44ff",
+                 "Framework": "#555566"}
+
+    para: dict = {}
+    for c in pe:
+        k = (c["Ab chain"], c["Ab resi"])
+        para.setdefault(k, {"resn": c["Ab resn"],
+                            "cdr":  lbl_map.get(k, "Framework"),
+                            "itypes": set()})["itypes"].add(c["Interaction"])
+
+    cols = sorted(para, key=lambda k: (
+        _CDR_ORDER.index(para[k]["cdr"]) if para[k]["cdr"] in _CDR_ORDER else 99, k[1]))
+
+    nc, nr = len(cols), len(itypes)
+    fig, ax = plt.subplots(figsize=(max(8, nc * 0.52 + 2.5), 3.8))
+    fig.patch.set_facecolor("#1a1a2e"); ax.set_facecolor("#1a1a2e")
+
+    for ci, k in enumerate(cols):
+        for ri, it in enumerate(itypes):
+            col = i_colors[it] if it in para[k]["itypes"] else "#22223a"
+            ax.add_patch(plt.Rectangle((ci, ri), 0.9, 0.88, color=col, alpha=0.9))
+        ax.add_patch(plt.Rectangle((ci, nr + 0.06), 0.9, 0.32,
+                                   color=cdr_cols.get(para[k]["cdr"], "#555"), alpha=0.9))
+
+    ax.set_xlim(0, nc); ax.set_ylim(-0.15, nr + 0.52)
+    ax.set_xticks([i + 0.45 for i in range(nc)])
+    ax.set_xticklabels([f"{para[k]['resn']}{k[1]}\n({k[0]})" for k in cols],
+                       fontsize=7, color="white")
+    ax.set_yticks([i + 0.44 for i in range(nr)])
+    ax.set_yticklabels(itypes, fontsize=9, color="white")
+    ax.tick_params(colors="white", length=0)
+    for sp in ax.spines.values(): sp.set_visible(False)
+    ax.set_title("Paratope Interaction Fingerprint", color="white", fontsize=11, pad=6)
+    patches = [mpatches.Patch(color=c, label=t) for t, c in i_colors.items()]
+    patches += [mpatches.Patch(color=cdr_cols[c], label=c)
+                for c in _CDR_ORDER if c in {para[k]["cdr"] for k in cols}]
+    ax.legend(handles=patches, fontsize=7, facecolor="#1a1a2e", edgecolor="#444",
+              labelcolor="white", ncol=2, loc="upper right")
+
+    buf = BytesIO()
+    fig.savefig(buf, format="png", dpi=130, bbox_inches="tight", facecolor="#1a1a2e")
+    plt.close(fig)
+    return buf.getvalue()
+
+
+def _png_ab_contact_map(pe: list, chain_info: dict) -> bytes:
+    """Paratope × epitope contact map, colored by dominant interaction type."""
+    import matplotlib; matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import matplotlib.patches as mpatches
+    from io import BytesIO
+    if not pe:
+        return b""
+
+    lbl_map  = _ab_cdr_label_map(chain_info)
+    i_colors = {"H-bond": "#ffdd00", "Salt bridge": "#ff66cc",
+                "Hydrophobic": "#66ff66", "VdW": "#aaaaaa"}
+    cdr_cols = {"CDR-H1": "#ff4444", "CDR-H2": "#ff8800", "CDR-H3": "#ffee00",
+                "CDR-L1": "#44cc44", "CDR-L2": "#4488ff", "CDR-L3": "#cc44ff",
+                "Framework": "#555566"}
+
+    para: dict = {}; epi: dict = {}; best: dict = {}
+    for c in pe:
+        ak = (c["Ab chain"], c["Ab resi"])
+        ek = (c["Ag chain"], c["Ag resi"])
+        para.setdefault(ak, {"resn": c["Ab resn"], "cdr": lbl_map.get(ak, "Framework")})
+        epi.setdefault(ek, c["Ag resn"])
+        it = c["Interaction"]
+        if (ak, ek) not in best or _ITYPE_PRI[it] < _ITYPE_PRI[best[(ak, ek)]]:
+            best[(ak, ek)] = it
+
+    rows = sorted(para, key=lambda k: (
+        _CDR_ORDER.index(para[k]["cdr"]) if para[k]["cdr"] in _CDR_ORDER else 99, k[1]))
+    xcols = sorted(epi, key=lambda k: (k[0], k[1]))
+
+    ny, nx = len(rows), len(xcols)
+    fig, ax = plt.subplots(figsize=(max(5, nx * 0.52 + 2.5), max(3.5, ny * 0.52 + 1.8)))
+    fig.patch.set_facecolor("#1a1a2e"); ax.set_facecolor("#1a1a2e")
+
+    for yi, ak in enumerate(rows):
+        for xi, ek in enumerate(xcols):
+            it = best.get((ak, ek))
+            ax.add_patch(plt.Rectangle((xi, yi), 0.9, 0.9,
+                                       color=i_colors[it] if it else "#22223a", alpha=0.9))
+        # CDR band on left
+        ax.add_patch(plt.Rectangle((-0.65, yi), 0.42, 0.9,
+                                   color=cdr_cols.get(para[ak]["cdr"], "#555"), alpha=0.9))
+
+    ax.set_xlim(-0.75, nx); ax.set_ylim(-0.1, ny)
+    ax.set_xticks([i + 0.45 for i in range(nx)])
+    ax.set_xticklabels([f"{epi[k]}{k[1]}\n({k[0]})" for k in xcols],
+                       fontsize=7, color="white")
+    ax.set_yticks([i + 0.45 for i in range(ny)])
+    ax.set_yticklabels([f"{para[k]['resn']}{k[1]}({k[0]})" for k in rows],
+                       fontsize=8, color="white")
+    ax.tick_params(colors="white", length=0)
+    for sp in ax.spines.values(): sp.set_visible(False)
+    ax.set_xlabel("Epitope residues", color="white", fontsize=9)
+    ax.set_ylabel("Paratope residues", color="white", fontsize=9)
+    ax.set_title("Paratope–Epitope Contact Map", color="white", fontsize=11, pad=6)
+    patches = [mpatches.Patch(color=c, label=t) for t, c in i_colors.items()]
+    patches += [mpatches.Patch(color=cdr_cols[c], label=c)
+                for c in _CDR_ORDER if c in {para[k]["cdr"] for k in rows}]
+    ax.legend(handles=patches, fontsize=7, facecolor="#1a1a2e", edgecolor="#444",
+              labelcolor="white", ncol=2, loc="upper right")
+
+    buf = BytesIO()
+    fig.savefig(buf, format="png", dpi=130, bbox_inches="tight", facecolor="#1a1a2e")
+    plt.close(fig)
+    return buf.getvalue()
+
+
+def _png_ab_rin(pe: list, chain_info: dict) -> bytes:
+    """Residue Interaction Network: bipartite graph, antibody left / antigen right."""
+    import matplotlib; matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import matplotlib.patches as mpatches
+    import matplotlib.lines as mlines
+    from io import BytesIO
+    if not pe:
+        return b""
+
+    lbl_map  = _ab_cdr_label_map(chain_info)
+    i_colors = {"H-bond": "#ffdd00", "Salt bridge": "#ff66cc",
+                "Hydrophobic": "#66ff66", "VdW": "#aaaaaa"}
+    cdr_cols = {"CDR-H1": "#ff4444", "CDR-H2": "#ff8800", "CDR-H3": "#ffee00",
+                "CDR-L1": "#44cc44", "CDR-L2": "#4488ff", "CDR-L3": "#cc44ff",
+                "Framework": "#666677"}
+
+    ab_nodes: dict = {}; ag_nodes: dict = {}; edges = []
+    for c in pe:
+        ak = (c["Ab chain"], c["Ab resi"])
+        ek = (c["Ag chain"], c["Ag resi"])
+        ab_nodes.setdefault(ak, {"resn": c["Ab resn"],
+                                 "cdr": lbl_map.get(ak, "Framework"), "n": 0})["n"] += 1
+        ag_nodes.setdefault(ek, {"resn": c["Ag resn"], "n": 0})["n"] += 1
+        edges.append((ak, ek, c["Interaction"]))
+
+    sorted_ab = sorted(ab_nodes, key=lambda k: (
+        _CDR_ORDER.index(ab_nodes[k]["cdr"]) if ab_nodes[k]["cdr"] in _CDR_ORDER else 99, k[1]))
+    sorted_ag = sorted(ag_nodes, key=lambda k: (k[0], k[1]))
+
+    nab, nag = len(sorted_ab), len(sorted_ag)
+    ab_pos = {k: (0.0, i / max(nab - 1, 1)) for i, k in enumerate(sorted_ab)}
+    ag_pos = {k: (1.0, i / max(nag - 1, 1)) for i, k in enumerate(sorted_ag)}
+
+    fig_h = max(5, max(nab, nag) * 0.38 + 1.5)
+    fig, ax = plt.subplots(figsize=(10, fig_h))
+    fig.patch.set_facecolor("#1a1a2e"); ax.set_facecolor("#1a1a2e")
+
+    for ak, ek, it in edges:
+        x0, y0 = ab_pos[ak]; x1, y1 = ag_pos[ek]
+        ax.plot([x0, x1], [y0, y1], color=i_colors.get(it, "#888"),
+                alpha=0.25, linewidth=1.2, zorder=1)
+
+    for k in sorted_ab:
+        x, y = ab_pos[k]
+        ax.scatter(x, y, s=70 + ab_nodes[k]["n"] * 18,
+                   c=cdr_cols.get(ab_nodes[k]["cdr"], "#666677"),
+                   zorder=3, edgecolors="white", linewidths=0.6)
+        ax.text(x - 0.04, y, f"{ab_nodes[k]['resn']}{k[1]} ({k[0]})",
+                ha="right", va="center", fontsize=7.5, color="white")
+
+    for k in sorted_ag:
+        x, y = ag_pos[k]
+        ax.scatter(x, y, s=70 + ag_nodes[k]["n"] * 18,
+                   c="#e15759", zorder=3, edgecolors="white", linewidths=0.6)
+        ax.text(x + 0.04, y, f"{ag_nodes[k]['resn']}{k[1]} ({k[0]})",
+                ha="left", va="center", fontsize=7.5, color="white")
+
+    ax.set_xlim(-0.38, 1.38); ax.set_ylim(-0.08, 1.1)
+    ax.axis("off")
+    ax.text(0.0, 1.07, "Paratope", ha="center", fontsize=10, color="white", weight="bold")
+    ax.text(1.0, 1.07, "Epitope",  ha="center", fontsize=10, color="white", weight="bold")
+    ax.set_title("Residue Interaction Network", color="white", fontsize=11, pad=8)
+
+    leg  = [mlines.Line2D([], [], color=c, linewidth=2, label=t) for t, c in i_colors.items()]
+    leg += [mpatches.Patch(color=cdr_cols[c], label=c)
+            for c in _CDR_ORDER if c in {ab_nodes[k]["cdr"] for k in sorted_ab}]
+    ax.legend(handles=leg, fontsize=7, facecolor="#1a1a2e", edgecolor="#444",
+              labelcolor="white", ncol=2, loc="lower center", bbox_to_anchor=(0.5, -0.04))
+
+    buf = BytesIO()
+    fig.savefig(buf, format="png", dpi=130, bbox_inches="tight", facecolor="#1a1a2e")
+    plt.close(fig)
+    return buf.getvalue()
+
+
 # ── CDR + Interface 3D Viewer ──────────────────────────────────────────────────
 
 # ── Interaction-type constants ─────────────────────────────────────────────────
@@ -665,6 +882,33 @@ hr.ab-sep {{ border:none; border-top:1px solid #2a2a48; margin:0; }}
         <span id="ab-surf-val" style="font-size:10px;width:30px;text-align:right">0.7</span>
       </div>
     </div>
+    <hr class="ab-sep">
+    <div class="ab-ctrl-section">
+      <b>Slab</b>
+      <div style="display:flex; align-items:center; gap:5px; margin-top:2px;">
+        <span style="font-size:10px; white-space:nowrap; color:#aaa">Far</span>
+        <input type="range" id="ab-slab-far" min="0" max="200" step="1" value="150"
+               style="flex:1; min-width:0" oninput="abUpdateSlab()">
+        <span id="ab-slab-far-val" style="font-size:10px;width:30px;text-align:right">150</span>
+      </div>
+      <div style="display:flex; align-items:center; gap:5px; margin-top:2px;">
+        <span style="font-size:10px; white-space:nowrap; color:#aaa">Near</span>
+        <input type="range" id="ab-slab-near" min="-200" max="0" step="1" value="-150"
+               style="flex:1; min-width:0" oninput="abUpdateSlab()">
+        <span id="ab-slab-near-val" style="font-size:10px;width:30px;text-align:right">-150</span>
+      </div>
+      <button onclick="abResetSlab()" style="margin-top:4px;font-size:10px;padding:1px 6px;cursor:pointer">Reset</button>
+    </div>
+
+    <hr class="ab-sep">
+    <div class="ab-ctrl-section">
+      <b>Click action</b>
+      <div class="ab-ctrl-row" style="margin-top:4px;">
+        <label class="ab-chk"><input type="radio" name="ab-click-mode" value="label" checked> Label</label>
+        <label class="ab-chk"><input type="radio" name="ab-click-mode" value="center"> Center</label>
+      </div>
+      <button onclick="abClearLabels()" style="margin-top:4px;font-size:10px;padding:1px 6px;cursor:pointer">Hide all labels</button>
+    </div>
 
     <hr class="ab-sep">
 
@@ -725,9 +969,58 @@ $(function() {{
   var surfObj   = null;   // current surface object
   var ilineObjs = [];     // current interaction line shapes
 
+  // Blend a hex color with gray (#888888) at the given gray fraction (0–1).
+  function abMixGray(hex, gray) {{
+    var r = parseInt(hex.slice(1,3),16), g = parseInt(hex.slice(3,5),16), b = parseInt(hex.slice(5,7),16);
+    var gr = 0x88;
+    var nr = Math.round(r*(1-gray) + gr*gray);
+    var ng = Math.round(g*(1-gray) + gr*gray);
+    var nb = Math.round(b*(1-gray) + gr*gray);
+    return "#" + [nr,ng,nb].map(function(v){{return ("0"+v.toString(16)).slice(-2);}}).join("");
+  }}
+  var _N_COL = "#4169e1";
+  var _O_COL = "#ff4444";
+  var _S_COL = "#ddcc00";
+  // Add sticks: baseColor for C, muted CPK for N/O/S/H.
+  function abAddStick(sel, baseColor, radius) {{
+    viewer.addStyle(sel, {{stick:{{radius:radius, colorfunc:function(atom) {{
+      if (atom.elem === "N") return _N_COL;
+      if (atom.elem === "O") return _O_COL;
+      if (atom.elem === "S") return _S_COL;
+      if (atom.elem === "H") return "#cccccc";
+      return baseColor;
+    }}}}}});
+  }}
+
   // ── Viewer init ───────────────────────────────────────────────────────────
   var viewer = $3Dmol.createViewer($("#ab-viewer"), {{backgroundColor:"0x1a1a2e"}});
   viewer.addModel(`{pdb_escaped}`, "pdb");
+
+  // ── Click handler: label / center / both ─────────────────────────────────
+  var _resLabels = {{}};
+  viewer.setClickable({{}}, true, function(atom) {{
+    var mode = document.querySelector('input[name="ab-click-mode"]:checked').value;
+    if (mode === "label") {{
+      var key = atom.chain + ":" + atom.resi;
+      if (_resLabels[key]) {{
+        viewer.removeLabel(_resLabels[key]);
+        delete _resLabels[key];
+      }} else {{
+        _resLabels[key] = viewer.addLabel(
+          atom.resn + " " + atom.resi + " (" + atom.chain + ")",
+          {{position: {{x:atom.x, y:atom.y, z:atom.z}},
+            backgroundColor: "black", backgroundOpacity: 0.65,
+            fontColor: "white", fontSize: 12,
+            borderColor: "#888", borderThickness: 0.5}}
+        );
+      }}
+    }}
+    if (mode === "center") {{
+      viewer.center({{serial:atom.serial}});
+      document.querySelector('input[name="ab-click-mode"][value="label"]').checked = true;
+    }}
+    viewer.render();
+  }});
 
   // ── Build chain checkboxes ────────────────────────────────────────────────
   var chainChecks = document.getElementById("ab-chain-checks");
@@ -774,6 +1067,26 @@ $(function() {{
       parseFloat(this.value).toFixed(2);
   }});
 
+  // ── Slab controls ─────────────────────────────────────────────────────────
+  window.abUpdateSlab = function() {{
+    var near = parseInt(document.getElementById("ab-slab-near").value);
+    var far  = parseInt(document.getElementById("ab-slab-far").value);
+    document.getElementById("ab-slab-near-val").textContent = near;
+    document.getElementById("ab-slab-far-val").textContent  = far;
+    viewer.setSlab(near, far);
+    viewer.render();
+  }};
+  window.abClearLabels = function() {{
+    Object.values(_resLabels).forEach(function(lbl) {{ viewer.removeLabel(lbl); }});
+    _resLabels = {{}};
+    viewer.render();
+  }};
+  window.abResetSlab = function() {{
+    document.getElementById("ab-slab-near").value = -150;
+    document.getElementById("ab-slab-far").value  =  150;
+    abUpdateSlab();
+  }};
+
   // ── Main render function ──────────────────────────────────────────────────
   window.abRender = function() {{
     var style      = document.querySelector('input[name="ab-style"]:checked').value;
@@ -817,8 +1130,9 @@ $(function() {{
       AB_CONTACT_BY_TYPE[typ].forEach(function(e) {{
         var chainChk = document.getElementById("ab-cc-" + e.chain);
         if (chainChk && !chainChk.checked) return;
-        viewer.addStyle({{chain:e.chain, resi:e.resi}},
-                        {{stick:{{radius:0.22, colorscheme:"default"}}}});
+        var ctype  = CHAIN_TYPES[e.chain] || "Unknown";
+        var ccolor = CHAIN_COLORS[ctype] || "#888888";
+        abAddStick({{chain:e.chain, resi:e.resi}}, abMixGray(ccolor, 0.2), 0.22);
       }});
     }});
 
@@ -828,8 +1142,7 @@ $(function() {{
       if (chainChk && !chainChk.checked) return;
       viewer.setStyle({{chain:e.chain, resi:e.resi}},
                       {{cartoon:{{color:EPITOPE_COLOR, opacity:1.0}}}});
-      viewer.addStyle({{chain:e.chain, resi:e.resi}},
-                      {{stick:{{radius:0.22, colorscheme:"default"}}}});
+      abAddStick({{chain:e.chain, resi:e.resi}}, abMixGray(EPITOPE_COLOR, 0.2), 0.22);
     }});
 
     // CDR loops — rendered last so carbon colors always win over prior passes.
@@ -840,11 +1153,7 @@ $(function() {{
       if (cdrChk && !cdrChk.checked) return;
       viewer.setStyle({{chain:e.chain, resi:e.resi}},
                       {{cartoon:{{color:e.color, opacity:1.0}}}});
-      // All atoms CPK first, then override carbons with CDR color.
-      viewer.addStyle({{chain:e.chain, resi:e.resi}},
-                      {{stick:{{radius:0.22, colorscheme:"default"}}}});
-      viewer.addStyle({{chain:e.chain, resi:e.resi, elem:"C"}},
-                      {{stick:{{radius:0.22, color:e.color}}}});
+      abAddStick({{chain:e.chain, resi:e.resi}}, e.color, 0.22);
     }});
 
     // Surface
@@ -908,7 +1217,7 @@ $(function() {{
         span.onclick = function() {{
           document.querySelectorAll(".ab-seq-aa").forEach(function(s) {{ s.classList.remove("ab-seq-sel"); }});
           span.classList.add("ab-seq-sel");
-          viewer.zoomTo({{chain:span.dataset.chain, resi:parseInt(span.dataset.resi)}});
+          viewer.center({{chain:span.dataset.chain, resi:parseInt(span.dataset.resi)}});
           viewer.render();
         }};
         body.appendChild(span);
@@ -1231,6 +1540,7 @@ with tab_viewer:
                 st.download_button(
                     "⬇ Download interface viewer HTML", _ab_html,
                     file_name=f"{pdb_path.stem}_antibody.html", mime="text/html",
+                    key="dl_ab_html_ligand",
                 )
             else:
                 st.info("No antibody chains or ligands detected in this structure.")
@@ -1346,6 +1656,35 @@ with tab_2d:
                         st.info("No interactions to plot.")
                 st.divider()
 
+        # ── Antibody interface diagrams ────────────────────────────────────────
+        _ab2d = _run_antibody_analysis(pdb_bytes)
+        _ab2d_pe = _ab2d.get("paratope_contacts", [])
+        if _ab2d_pe:
+            st.subheader("Antibody Interface Diagrams")
+            d_fp, d_cm, d_rin = st.tabs(
+                ["🔲 Interaction Fingerprint", "🗺 Contact Map", "🕸 Interaction Network"])
+            with d_fp:
+                fp_img = _png_ab_fingerprint(_ab2d_pe, _ab2d["chains"])
+                if fp_img:
+                    st.image(fp_img, width="stretch")
+                    st.download_button("⬇ Fingerprint PNG", fp_img,
+                                       file_name=f"{pdb_path.stem}_ab_fingerprint.png",
+                                       mime="image/png", key="dl_ab_fp")
+            with d_cm:
+                cm_img = _png_ab_contact_map(_ab2d_pe, _ab2d["chains"])
+                if cm_img:
+                    st.image(cm_img, width="stretch")
+                    st.download_button("⬇ Contact Map PNG", cm_img,
+                                       file_name=f"{pdb_path.stem}_ab_contactmap.png",
+                                       mime="image/png", key="dl_ab_cm")
+            with d_rin:
+                rin_img = _png_ab_rin(_ab2d_pe, _ab2d["chains"])
+                if rin_img:
+                    st.image(rin_img, width="stretch")
+                    st.download_button("⬇ Network PNG", rin_img,
+                                       file_name=f"{pdb_path.stem}_ab_rin.png",
+                                       mime="image/png", key="dl_ab_rin")
+
 
 # ─── TAB 5: Antibody Analysis ─────────────────────────────────────────────────
 with tab_ab:
@@ -1436,45 +1775,6 @@ with tab_ab:
                     "⬇ CDR table CSV", df_cdr.to_csv(index=False),
                     file_name=f"{pdb_path.stem}_cdrs.csv", mime="text/csv",
                 )
-
-            # ── Interface 3D Viewer ────────────────────────────────────────────
-            st.divider()
-            st.subheader("Interface 3D Viewer")
-
-            # Summarise what was auto-detected
-            _id_parts = []
-            if vh_chains:
-                _id_parts.append(f"**VH** chain(s): {', '.join(vh_chains)}")
-            if vl_chains:
-                _id_parts.append(f"**VL** chain(s): {', '.join(vl_chains)}")
-            if ag_chains:
-                _id_parts.append(f"**Antigen** chain(s): {', '.join(ag_chains)}")
-            else:
-                _id_parts.append("no antigen chain detected")
-            st.caption("  ·  ".join(_id_parts))
-
-            _has_pe = bool(ab_data.get("paratope_contacts"))
-            if _has_pe:
-                _n_ep = len({(c["Ag chain"], c["Ag resi"])
-                              for c in ab_data["paratope_contacts"]})
-                st.caption(
-                    f"View centred on the paratope tip (CDR-H3 preferred).  "
-                    f"Gold = **{_n_ep}** epitope residues.  "
-                    f"Framework is semi-transparent to expose the binding site."
-                )
-            else:
-                st.caption(
-                    "View centred on CDR loops.  "
-                    "No antigen contacts to highlight — upload a co-crystal structure "
-                    "to see the epitope."
-                )
-
-            ab_html = _render_antibody_html(pdb_bytes, ab_data, width=1100, height=780)
-            components.html(ab_html, height=820, scrolling=False)
-            st.download_button(
-                "⬇ Download interface viewer HTML", ab_html,
-                file_name=f"{pdb_path.stem}_antibody.html", mime="text/html",
-            )
 
             # ── VH-VL Interface ────────────────────────────────────────────────
             if vh_chains and vl_chains:
