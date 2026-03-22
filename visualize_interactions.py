@@ -1282,7 +1282,8 @@ def plot_interaction_summary(report: LigandReport,
 def plot_ligand_2d(structure_path: str | Path,
                    report: LigandReport,
                    output_path: str | Path,
-                   structure: Structure | None = None) -> Path:
+                   structure: Structure | None = None,
+                   show_types: set[str] | None = None) -> Path:
     """
     Save a LIGPLOT-style 2D interaction diagram.
 
@@ -1355,30 +1356,52 @@ def plot_ligand_2d(structure_path: str | Path,
             if np.linalg.norm(coords_3d[i] - coords_3d[j]) < 1.9:
                 bonds.append((i, j))
 
-    # ── Collect interacting residues and their interaction types ──────────────
+    # ── Atom name -> 2D position lookup ──────────────────────────────────────
+    name_to_2d: dict[str, np.ndarray] = {
+        name: lig_2d[i] for i, (_, name, _) in enumerate(lig_atoms)
+    }
+
+    # ── Collect interacting residues, types, and specific ligand atom ─────────
     lig_key = (report.ligand_chain, report.ligand_resi)
-    res_types: dict[tuple, set[str]] = defaultdict(set)
-    res_names: dict[tuple, str]      = {}
+    _IPRI = {"hbond": 0, "salt": 1, "pi": 2, "contact": 3}
+
+    res_types:      dict[tuple, set[str]] = defaultdict(set)
+    res_names:      dict[tuple, str]      = {}
+    res_lig_atom:   dict[tuple, str]      = {}   # best-priority ligand atom per residue
+    res_best_itype: dict[tuple, str]      = {}
+
+    def _add(key, resn, itype, lig_atom):
+        if show_types is not None and itype not in show_types:
+            return
+        res_types[key].add(itype)
+        res_names[key] = resn
+        if _IPRI[itype] < _IPRI.get(res_best_itype.get(key, "contact"), 3):
+            res_best_itype[key] = itype
+            res_lig_atom[key]   = lig_atom.strip()
 
     for c in report.contacts:
-        key = (c.chain2, c.resi2)
-        if key != lig_key:
-            res_types[key].add("contact");  res_names[key] = c.resn2
+        if (c.chain1, c.resi1) == lig_key:
+            _add((c.chain2, c.resi2), c.resn2, "contact", c.atom1)
+        elif (c.chain2, c.resi2) == lig_key:
+            _add((c.chain1, c.resi1), c.resn1, "contact", c.atom2)
+
     for h in report.hbonds:
-        for key, resn in [((h.donor_chain,    h.donor_resi),    h.donor_resn),
-                           ((h.acceptor_chain, h.acceptor_resi), h.acceptor_resn)]:
-            if key != lig_key:
-                res_types[key].add("hbond");  res_names[key] = resn
+        if (h.donor_chain, h.donor_resi) == lig_key:
+            _add((h.acceptor_chain, h.acceptor_resi), h.acceptor_resn, "hbond", h.donor_atom)
+        elif (h.acceptor_chain, h.acceptor_resi) == lig_key:
+            _add((h.donor_chain, h.donor_resi), h.donor_resn, "hbond", h.acceptor_atom)
+
     for p in report.pi_interactions:
-        for key, resn in [((p.chain1, p.resi1), p.resn1),
-                           ((p.chain2, p.resi2), p.resn2)]:
-            if key != lig_key:
-                res_types[key].add("pi");  res_names[key] = resn
+        if (p.chain1, p.resi1) == lig_key:
+            _add((p.chain2, p.resi2), p.resn2, "pi", p.ring1_label.split(",")[0])
+        elif (p.chain2, p.resi2) == lig_key:
+            _add((p.chain1, p.resi1), p.resn1, "pi", p.ring2_label.split(",")[0])
+
     for s in report.salt_bridges:
-        for key, resn in [((s.cation_chain, s.cation_resi), s.cation_resn),
-                           ((s.anion_chain,  s.anion_resi),  s.anion_resn)]:
-            if key != lig_key:
-                res_types[key].add("salt");  res_names[key] = resn
+        if (s.cation_chain, s.cation_resi) == lig_key:
+            _add((s.anion_chain, s.anion_resi), s.anion_resn, "salt", s.cation_atom)
+        elif (s.anion_chain, s.anion_resi) == lig_key:
+            _add((s.cation_chain, s.cation_resi), s.cation_resn, "salt", s.anion_atom)
 
     if not res_types:
         print("  No interactions found for 2D diagram.")
@@ -1407,46 +1430,57 @@ def plot_ligand_2d(structure_path: str | Path,
     )
 
     # ── Draw interaction lines (behind everything) ────────────────────────────
-    origin = np.array([0.0, 0.0])
+    # Line colours match the 3D viewer palette
+    _LINE_STYLE = {
+        "hbond":   (_DASH_COLORS["hbond"], "--", 1.8),   # yellow
+        "salt":    (_DASH_COLORS["salt"],  "--", 1.8),   # orange
+        "pi":      (_DASH_COLORS["pi"],    "--", 1.6),   # magenta
+        "contact": (_COLORS["contact"]["hex"], "-", 1.2), # cyan
+    }
     for key in res_keys:
-        types  = res_types[key]
-        rpos   = res_pos[key]
-        direc  = origin - rpos
+        types = res_types[key]
+        rpos  = res_pos[key]
+
+        # Pick highest-priority type for this residue
+        itype = min(types, key=lambda t: _IPRI[t])
+        color, ls, lw = _LINE_STYLE[itype]
+
+        # Anchor at the specific interacting ligand atom (fallback: origin)
+        atom_nm  = res_lig_atom.get(key, "")
+        atom_pos = name_to_2d.get(atom_nm, np.array([0.0, 0.0]))
+
+        direc  = atom_pos - rpos
         d_norm = np.linalg.norm(direc)
         if d_norm > 0:
             direc /= d_norm
 
-        if "hbond" in types:
-            color, ls, lw = _DASH_COLORS["hbond"], "--", 1.8
-        elif "salt" in types:
-            color, ls, lw = _DASH_COLORS["salt"],  "--", 1.8
-        elif "pi" in types:
-            color, ls, lw = _DASH_COLORS["pi"],    "--", 1.6
-        else:
-            color, ls, lw = "#999999",              "-",  1.0
-
-        ax.plot([origin[0], rpos[0]], [origin[1], rpos[1]],
-                ls, color=color, linewidth=lw, zorder=1, alpha=0.85)
+        ax.plot([atom_pos[0], rpos[0]], [atom_pos[1], rpos[1]],
+                ls, color=color, linewidth=lw, zorder=1, alpha=0.9)
 
         if types == {"contact"}:          # pure hydrophobic → spoked arc
             _draw_spoked_arc(ax, rpos, direc)
 
-    # ── Draw ligand bonds ─────────────────────────────────────────────────────
+    # ── Draw ligand bonds (sticks) ────────────────────────────────────────────
     for i, j in bonds:
-        ax.plot([lig_2d[i, 0], lig_2d[j, 0]],
-                [lig_2d[i, 1], lig_2d[j, 1]],
-                "k-", linewidth=2.0, solid_capstyle="round", zorder=2)
+        ei = lig_atoms[i][0]; ej = lig_atoms[j][0]
+        ci = _CPK_COLORS.get(ei, _CPK_COLORS.get(ei[:1], "#FF1493"))
+        cj = _CPK_COLORS.get(ej, _CPK_COLORS.get(ej[:1], "#FF1493"))
+        xi, yi = lig_2d[i]; xj, yj = lig_2d[j]
+        mx, my = (xi+xj)/2, (yi+yj)/2
+        # Draw each half in its atom's CPK colour
+        ax.plot([xi, mx], [yi, my], color=ci, linewidth=6.0,
+                solid_capstyle="round", zorder=2)
+        ax.plot([mx, xj], [my, yj], color=cj, linewidth=6.0,
+                solid_capstyle="round", zorder=2)
 
-    # ── Draw ligand atoms ─────────────────────────────────────────────────────
-    ATOM_R = 0.13
+    # ── Heteroatom element labels (no circles) ────────────────────────────────
     for idx, (elem, _name, _) in enumerate(lig_atoms):
+        if elem == "C":
+            continue
         color = _CPK_COLORS.get(elem, _CPK_COLORS.get(elem[:1], "#FF1493"))
         x, y  = lig_2d[idx]
-        ax.add_patch(plt.Circle((x, y), ATOM_R, color=color,
-                                zorder=3, ec="#222222", lw=0.6))
-        if elem != "C":
-            ax.text(x, y + ATOM_R + 0.07, elem, ha="center", va="bottom",
-                    fontsize=6.5, color="#222", zorder=4, fontweight="bold")
+        ax.text(x, y, elem, ha="center", va="center",
+                fontsize=7.0, color=color, zorder=4, fontweight="bold")
 
     # ── Draw residue boxes ────────────────────────────────────────────────────
     for key in res_keys:
@@ -1470,14 +1504,10 @@ def plot_ligand_2d(structure_path: str | Path,
 
     # ── Legend ─────────────────────────────────────────────────────────────────
     legend_items = [
-        Line2D([0], [0], ls="--", color=_DASH_COLORS["hbond"], lw=1.8,
-               label="H-bond"),
-        Line2D([0], [0], ls="--", color=_DASH_COLORS["pi"],    lw=1.6,
-               label="Pi interaction"),
-        Line2D([0], [0], ls="--", color=_DASH_COLORS["salt"],  lw=1.8,
-               label="Salt bridge"),
-        Line2D([0], [0], ls="-",  color="#999999",              lw=1.0,
-               label="Hydrophobic contact"),
+        Line2D([0], [0], ls="--", color=_DASH_COLORS["hbond"],        lw=1.8, label="H-bond"),
+        Line2D([0], [0], ls="--", color=_DASH_COLORS["pi"],           lw=1.6, label="Pi interaction"),
+        Line2D([0], [0], ls="--", color=_DASH_COLORS["salt"],         lw=1.8, label="Salt bridge"),
+        Line2D([0], [0], ls="-",  color=_COLORS["contact"]["hex"],    lw=1.2, label="Hydrophobic contact"),
     ]
     ax.legend(handles=legend_items, loc="lower right", fontsize=8.5,
               framealpha=0.9, edgecolor="#cccccc")

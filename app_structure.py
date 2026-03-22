@@ -173,10 +173,10 @@ def _png_fingerprint(report, title: str = "") -> bytes:
     data = p.read_bytes(); p.unlink(missing_ok=True); return data
 
 
-def _png_2d(pdb_path: Path, report, structure) -> bytes:
+def _png_2d(pdb_path: Path, report, structure, show_types=None) -> bytes:
     with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
         p = Path(f.name)
-    plot_ligand_2d(pdb_path, report, p, structure=structure)
+    plot_ligand_2d(pdb_path, report, p, structure=structure, show_types=show_types)
     data = p.read_bytes(); p.unlink(missing_ok=True); return data
 
 
@@ -543,31 +543,35 @@ with tab_2d:
                 lig_label = f"{rep.ligand_resn} chain {rep.ligand_chain}:{rep.ligand_resi}"
                 st.markdown(f"### {lig_label}")
                 st.caption(rep.summary())
-                col_fp, col_2d = st.columns(2, gap="large")
                 key = f"{rep.ligand_resn}_{rep.ligand_resi}"
                 has_interactions = (rep.n_contacts + rep.n_hbonds +
                                     rep.n_pi + rep.n_salt_bridges) > 0
-                with col_fp:
-                    st.markdown("#### Interaction Fingerprint")
-                    st.caption("Dot size = contact count · Dot shade = proximity · Number = count when >1")
-                    if has_interactions:
-                        fp_bytes = _png_fingerprint(rep)
-                        st.image(fp_bytes, width="stretch")
-                        st.download_button("⬇ Fingerprint PNG", fp_bytes,
-                                           file_name=f"{rep.ligand_resn}_fingerprint.png",
-                                           mime="image/png", key=f"fp_{key}")
-                    else:
-                        st.info("No interactions to plot.")
-                with col_2d:
-                    st.markdown("#### LIGPLOT-style 2D Diagram")
-                    st.caption("Ligand in centre (CPK colours) · Protein residues at periphery · "
-                               "Spoked arcs = hydrophobic contacts")
-                    if has_interactions:
-                        d2_bytes = _png_2d(pdb_path, rep, structure_2d)
-                        st.image(d2_bytes, width="stretch")
-                        st.download_button("⬇ 2D diagram PNG", d2_bytes,
-                                           file_name=f"{rep.ligand_resn}_2d.png",
-                                           mime="image/png", key=f"2d_{key}")
-                    else:
-                        st.info("No interactions to plot.")
+
+                st.markdown("#### LIGPLOT-style 2D Diagram")
+                fc1, fc2, fc3, fc4 = st.columns(4)
+                show_hbond   = fc1.checkbox("H-bond",     value=True, key=f"sh_hb_{key}")
+                show_salt    = fc2.checkbox("Salt bridge", value=True, key=f"sh_salt_{key}")
+                show_pi      = fc3.checkbox("Pi",          value=True, key=f"sh_pi_{key}")
+                show_contact = fc4.checkbox("Hydrophobic", value=True, key=f"sh_cont_{key}")
+                show_types = {t for t, v in [("hbond", show_hbond), ("salt", show_salt),
+                                              ("pi", show_pi), ("contact", show_contact)] if v}
+                if has_interactions:
+                    d2_bytes = _png_2d(pdb_path, rep, structure_2d, show_types=show_types)
+                    st.image(d2_bytes, width="stretch")
+                    st.download_button("⬇ 2D diagram PNG", d2_bytes,
+                                       file_name=f"{rep.ligand_resn}_2d.png",
+                                       mime="image/png", key=f"2d_{key}")
+                else:
+                    st.info("No interactions to plot.")
+
+                st.markdown("#### Interaction Fingerprint")
+                st.caption("Dot size = contact count · Dot shade = proximity · Number = count when >1")
+                if has_interactions:
+                    fp_bytes = _png_fingerprint(rep)
+                    st.image(fp_bytes, width="stretch")
+                    st.download_button("⬇ Fingerprint PNG", fp_bytes,
+                                       file_name=f"{rep.ligand_resn}_fingerprint.png",
+                                       mime="image/png", key=f"fp_{key}")
+                else:
+                    st.info("No interactions to plot.")
                 st.divider()
